@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f4f6fb">
+  <title>Quadros — Kanban</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="script.js" defer></script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <a class="brand" href="#" aria-label="Quadros, início">
+        <span class="brand-mark" aria-hidden="true">Q</span>
+        <span>quadros</span>
+      </a>
+      <div class="topbar-actions">
+        <button class="icon-button" id="themeToggle" type="button" aria-label="Ativar tema escuro" title="Alternar tema">
+          <span id="themeIcon" aria-hidden="true">☾</span>
+        </button>
+      </div>
+    </header>
+
+    <main class="main-content">
+      <section id="homeView" class="view" aria-labelledby="homeTitle">
+        <div class="page-heading">
+          <div>
+            <p class="eyebrow">SEU ESPAÇO DE TRABALHO</p>
+            <h1 id="homeTitle">Seus quadros</h1>
+            <p class="page-description">Organize suas ideias e acompanhe cada etapa.</p>
+          </div>
+          <button class="primary-button" id="createBoardButton" type="button">
+            <span aria-hidden="true">＋</span> Criar quadro
+          </button>
+        </div>
+        <div id="boardGrid" class="board-grid" aria-live="polite"></div>
+        <p id="emptyBoards" class="empty-state" hidden>Você ainda não tem quadros. Crie o primeiro para começar!</p>
+      </section>
+
+      <section id="boardView" class="view" aria-labelledby="boardTitle" hidden>
+        <div class="board-toolbar">
+          <button class="back-button" id="backButton" type="button"><span aria-hidden="true">←</span> Voltar</button>
+          <div class="board-heading">
+            <span id="activeBoardColor" class="board-color-dot" aria-hidden="true"></span>
+            <h1 id="boardTitle"></h1>
+            <button id="renameBoardButton" class="icon-button small" type="button" aria-label="Renomear quadro" title="Renomear quadro">✎</button>
+            <button id="changeBoardColorButton" class="icon-button small" type="button" aria-label="Trocar cor do quadro" title="Trocar cor">●</button>
+            <button id="deleteBoardButton" class="icon-button small danger-icon" type="button" aria-label="Excluir quadro" title="Excluir quadro">⌫</button>
+          </div>
+          <label class="search-box">
+            <span aria-hidden="true">⌕</span>
+            <span class="visually-hidden">Buscar tarefas pelo título</span>
+            <input id="taskSearch" type="search" placeholder="Buscar tarefas..." autocomplete="off">
+            <kbd>/</kbd>
+          </label>
+        </div>
+        <div id="columns" class="columns" aria-label="Colunas do quadro"></div>
+      </section>
+    </main>
+    <footer class="app-footer">Feito para deixar suas ideias em movimento.</footer>
+  </div>
+
+  <dialog id="taskDialog" class="task-dialog">
+    <form id="taskForm" method="dialog">
+      <div class="dialog-heading">
+        <div>
+          <p class="eyebrow">TAREFA</p>
+          <h2 id="taskDialogTitle">Adicionar tarefa</h2>
+        </div>
+        <button class="icon-button" id="closeTaskDialog" type="button" aria-label="Fechar">×</button>
+      </div>
+      <label class="form-field">
+        <span>Título</span>
+        <input id="taskTitleInput" name="title" type="text" maxlength="120" required placeholder="Ex.: Preparar apresentação">
+      </label>
+      <label class="form-field">
+        <span>Descrição <small>(opcional)</small></span>
+        <textarea id="taskDescriptionInput" name="description" rows="3" maxlength="300" placeholder="Adicione alguns detalhes..."></textarea>
+      </label>
+      <div class="form-row">
+        <label class="form-field">
+          <span>Prioridade</span>
+          <select id="taskPriorityInput" name="priority">
+            <option value="baixa">Baixa</option>
+            <option value="media" selected>Média</option>
+            <option value="alta">Alta</option>
+          </select>
+        </label>
+        <label class="form-field">
+          <span>Data de entrega</span>
+          <input id="taskDueDateInput" name="dueDate" type="date">
+        </label>
+      </div>
+      <div class="dialog-actions">
+        <button class="secondary-button" id="cancelTaskButton" type="button">Cancelar</button>
+        <button class="primary-button" type="submit">Salvar tarefa</button>
+      </div>
+    </form>
+  </dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+</body>
+</html>
