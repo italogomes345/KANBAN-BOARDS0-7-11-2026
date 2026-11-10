@@ -3,19 +3,20 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#f4f6fb">
-  <title>Quadros — Kanban</title>
+  <meta name="theme-color" content="#f4f6f7">
+  <title>Quadros | Kanban pessoal</title>
   <link rel="stylesheet" href="style.css">
   <script src="script.js" defer></script>
 </head>
 <body>
   <div class="app-shell">
     <header class="topbar">
-      <a class="brand" href="#" aria-label="Quadros, início">
-        <span class="brand-mark" aria-hidden="true">Q</span>
-        <span>quadros</span>
+      <a class="brand" id="homeLink" href="#" aria-label="Ir para a página inicial">
+        <span class="brand-mark" aria-hidden="true">Q</span><span>quadros</span>
       </a>
       <div class="topbar-actions">
+        <span id="userName" class="user-name" hidden></span>
+        <button id="logoutButton" class="secondary-button" type="button" hidden>Sair</button>
         <button class="icon-button" id="themeToggle" type="button" aria-label="Ativar tema escuro" title="Alternar tema">
           <span id="themeIcon" aria-hidden="true">☾</span>
         </button>
@@ -23,78 +24,122 @@
     </header>
 
     <main class="main-content">
-      <section id="homeView" class="view" aria-labelledby="homeTitle">
-        <div class="page-heading">
-          <div>
-            <p class="eyebrow">SEU ESPAÇO DE TRABALHO</p>
-            <h1 id="homeTitle">Seus quadros</h1>
-            <p class="page-description">Organize suas ideias e acompanhe cada etapa.</p>
-          </div>
-          <button class="primary-button" id="createBoardButton" type="button">
-            <span aria-hidden="true">＋</span> Criar quadro
-          </button>
+      <section id="authView" class="view" aria-labelledby="authTitle">
+        <div class="auth-wrap">
+          <p class="eyebrow">SEU ESPAÇO DE TRABALHO</p>
+          <h1 id="authTitle">Entre na sua conta</h1>
+          <p id="authIntro" class="auth-intro">Acesse seus quadros e continue organizando suas tarefas.</p>
+          <form id="authForm" novalidate>
+            <div id="nameField" class="form-field" hidden>
+              <label for="nameInput">Nome</label>
+              <input id="nameInput" type="text" maxlength="80" autocomplete="name">
+            </div>
+            <div id="usernameField" class="form-field" hidden>
+              <label for="usernameInput">Nome de usuário</label>
+              <input id="usernameInput" type="text" maxlength="40" autocomplete="username">
+            </div>
+            <div id="emailField" class="form-field" hidden>
+              <label for="emailInput">E-mail</label>
+              <input id="emailInput" type="email" maxlength="254" autocomplete="email">
+            </div>
+            <div class="form-field">
+              <label for="loginIdentifier">E-mail ou nome de usuário</label>
+              <input id="loginIdentifier" type="text" maxlength="254" autocomplete="username" required>
+            </div>
+            <div class="form-field">
+              <label for="passwordInput">Senha</label>
+              <div class="password-control">
+                <input id="passwordInput" type="password" autocomplete="current-password" required>
+                <button id="togglePassword" class="visibility-button" type="button" aria-label="Mostrar senha" aria-pressed="false">Mostrar</button>
+              </div>
+            </div>
+            <div id="confirmField" class="form-field" hidden>
+              <label for="confirmPasswordInput">Confirme a senha</label>
+              <div class="password-control">
+                <input id="confirmPasswordInput" type="password" autocomplete="new-password">
+                <button id="toggleConfirmPassword" class="visibility-button" type="button" aria-label="Mostrar confirmação de senha" aria-pressed="false">Mostrar</button>
+              </div>
+            </div>
+            <p id="authError" class="form-error" role="alert" aria-live="polite"></p>
+            <button id="authSubmit" class="primary-button auth-submit" type="submit">Entrar</button>
+          </form>
+          <p class="auth-switch"><span id="authSwitchText">Ainda não tem conta?</span>
+            <button id="authModeToggle" class="text-button" type="button">Cadastre-se</button>
+          </p>
         </div>
-        <div id="boardGrid" class="board-grid" aria-live="polite"></div>
-        <p id="emptyBoards" class="empty-state" hidden>Você ainda não tem quadros. Crie o primeiro para começar!</p>
       </section>
 
-      <section id="boardView" class="view" aria-labelledby="boardTitle" hidden>
-        <div class="board-toolbar">
-          <button class="back-button" id="backButton" type="button"><span aria-hidden="true">←</span> Voltar</button>
-          <div class="board-heading">
-            <span id="activeBoardColor" class="board-color-dot" aria-hidden="true"></span>
-            <h1 id="boardTitle"></h1>
-            <button id="renameBoardButton" class="icon-button small" type="button" aria-label="Renomear quadro" title="Renomear quadro">✎</button>
-            <button id="changeBoardColorButton" class="icon-button small" type="button" aria-label="Trocar cor do quadro" title="Trocar cor">●</button>
-            <button id="deleteBoardButton" class="icon-button small danger-icon" type="button" aria-label="Excluir quadro" title="Excluir quadro">⌫</button>
+      <div id="appView" hidden>
+        <section id="homeView" class="view" aria-labelledby="homeTitle">
+          <div class="page-heading">
+            <div>
+              <p class="eyebrow">SEU ESPAÇO DE TRABALHO</p>
+              <h1 id="homeTitle">Seus quadros</h1>
+              <p class="page-description">Organize suas ideias e acompanhe cada etapa.</p>
+            </div>
+            <button class="primary-button" id="createBoardButton" type="button"><span aria-hidden="true">＋</span> Criar quadro</button>
           </div>
-          <label class="search-box">
-            <span aria-hidden="true">⌕</span>
-            <span class="visually-hidden">Buscar tarefas pelo título</span>
-            <input id="taskSearch" type="search" placeholder="Buscar tarefas..." autocomplete="off">
-            <kbd>/</kbd>
-          </label>
-        </div>
-        <div id="columns" class="columns" aria-label="Colunas do quadro"></div>
-      </section>
+          <div id="boardGrid" class="board-grid" aria-live="polite"></div>
+          <p id="emptyBoards" class="empty-state" hidden>Você ainda não tem quadros. Crie o primeiro para começar.</p>
+        </section>
+
+        <section id="boardView" class="view" aria-labelledby="boardTitle" hidden>
+          <div class="board-toolbar">
+            <button class="back-button" id="backButton" type="button"><span aria-hidden="true">←</span> Voltar</button>
+            <div class="board-heading">
+              <span id="activeBoardColor" class="board-color-dot" aria-hidden="true"></span>
+              <h1 id="boardTitle"></h1>
+              <button id="renameBoardButton" class="icon-button small" type="button" aria-label="Renomear quadro" title="Renomear quadro">✎</button>
+              <button id="changeBoardColorButton" class="icon-button small" type="button" aria-label="Trocar cor do quadro" title="Trocar cor">●</button>
+              <button id="deleteBoardButton" class="icon-button small danger-icon" type="button" aria-label="Excluir quadro" title="Excluir quadro">⌫</button>
+            </div>
+            <label class="search-box">
+              <span aria-hidden="true">⌕</span>
+              <span class="visually-hidden">Buscar tarefas pelo título</span>
+              <input id="taskSearch" type="search" placeholder="Buscar tarefas..." autocomplete="off">
+              <kbd>/</kbd>
+            </label>
+          </div>
+          <div class="board-actions">
+            <button id="addTaskButton" class="primary-button" type="button"><span aria-hidden="true">＋</span> Adicionar nova tarefa</button>
+          </div>
+          <div id="columns" class="columns" aria-label="Colunas do quadro"></div>
+        </section>
+      </div>
     </main>
     <footer class="app-footer">Feito para deixar suas ideias em movimento.</footer>
   </div>
 
   <dialog id="taskDialog" class="task-dialog">
-    <form id="taskForm" method="dialog">
+    <form id="taskForm" novalidate>
       <div class="dialog-heading">
-        <div>
-          <p class="eyebrow">TAREFA</p>
-          <h2 id="taskDialogTitle">Adicionar tarefa</h2>
-        </div>
+        <div><p class="eyebrow">TAREFA</p><h2 id="taskDialogTitle">Adicionar tarefa</h2></div>
         <button class="icon-button" id="closeTaskDialog" type="button" aria-label="Fechar">×</button>
       </div>
-      <label class="form-field">
-        <span>Título</span>
+      <div class="form-field">
+        <label for="taskTitleInput">Título</label>
         <input id="taskTitleInput" name="title" type="text" maxlength="120" required placeholder="Ex.: Preparar apresentação">
-      </label>
-      <label class="form-field">
-        <span>Descrição <small>(opcional)</small></span>
+      </div>
+      <p id="taskError" class="form-error" role="alert" aria-live="polite"></p>
+      <div class="form-field">
+        <label for="taskDescriptionInput">Descrição <small>(opcional)</small></label>
         <textarea id="taskDescriptionInput" name="description" rows="3" maxlength="300" placeholder="Adicione alguns detalhes..."></textarea>
-      </label>
+      </div>
       <div class="form-row">
-        <label class="form-field">
-          <span>Prioridade</span>
+        <div class="form-field">
+          <label for="taskPriorityInput">Prioridade</label>
           <select id="taskPriorityInput" name="priority">
-            <option value="baixa">Baixa</option>
-            <option value="media" selected>Média</option>
-            <option value="alta">Alta</option>
+            <option value="baixa">Baixa</option><option value="media" selected>Média</option><option value="alta">Alta</option>
           </select>
-        </label>
-        <label class="form-field">
-          <span>Data de entrega</span>
+        </div>
+        <div class="form-field">
+          <label for="taskDueDateInput">Data de entrega</label>
           <input id="taskDueDateInput" name="dueDate" type="date">
-        </label>
+        </div>
       </div>
       <div class="dialog-actions">
         <button class="secondary-button" id="cancelTaskButton" type="button">Cancelar</button>
-        <button class="primary-button" type="submit">Salvar tarefa</button>
+        <button class="primary-button" type="submit">Salvar</button>
       </div>
     </form>
   </dialog>
