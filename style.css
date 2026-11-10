@@ -163,9 +163,13 @@ body.dark-theme .primary-button { color: #14251f; }
 .add-column-button { min-width: 145px; height: 44px; border: 1px dashed var(--muted); border-radius: var(--radius-small); color: var(--muted); background: transparent; font-size: 12px; font-weight: 700; }
 .add-column-button:hover { border-color: var(--accent); color: var(--accent); }
 .app-footer { padding: 12px 0 18px; color: var(--muted); font-size: 11px; text-align: center; }
+.loading-state { width: min(540px, 100%); margin: 56px auto; padding: 26px; border: 1px solid var(--line); border-radius: var(--radius); color: var(--muted); background: var(--surface); text-align: center; }
+.loading-state p { margin-bottom: 16px; }
 
 /* MODAL E AVISOS */
 .task-dialog { width: min(480px, calc(100vw - 28px)); padding: 23px; border: 1px solid var(--line); border-radius: 14px; color: var(--text); background: var(--surface); box-shadow: 0 20px 70px rgba(14, 30, 23, .25); }
+.import-dialog { width: min(540px, calc(100vw - 28px)); }
+.import-description { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .task-dialog::backdrop { background: rgba(17, 26, 22, .48); backdrop-filter: blur(2px); }
 .dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
 .dialog-heading h2 { margin: 0; font-size: 20px; }

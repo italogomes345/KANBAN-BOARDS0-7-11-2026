@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f4f6f7">
   <title>Quadros | Kanban pessoal</title>
   <link rel="stylesheet" href="style.css">
-  <script src="script.js" defer></script>
+  <script type="module" src="script.js"></script>
 </head>
 <body>
   <div class="app-shell">
@@ -30,12 +30,8 @@
           <h1 id="authTitle">Entre na sua conta</h1>
           <p id="authIntro" class="auth-intro">Acesse seus quadros e continue organizando suas tarefas.</p>
           <form id="authForm" novalidate>
-            <div id="nameField" class="form-field" hidden>
-              <label for="nameInput">Nome</label>
-              <input id="nameInput" type="text" maxlength="80" autocomplete="name">
-            </div>
             <div id="usernameField" class="form-field" hidden>
-              <label for="usernameInput">Nome de usuário</label>
+              <label for="usernameInput">Nome de usuário (nome exibido)</label>
               <input id="usernameInput" type="text" maxlength="40" autocomplete="username">
             </div>
             <div id="emailField" class="form-field" hidden>
@@ -70,6 +66,13 @@
       </section>
 
       <div id="appView" hidden>
+        <section id="loadingView" class="loading-state" aria-live="polite" hidden>
+          <p id="loadingMessage">Carregando seus quadros...</p>
+        </section>
+        <section id="dataErrorView" class="loading-state" role="alert" hidden>
+          <p id="dataErrorMessage"></p>
+          <button id="retryDataButton" class="secondary-button" type="button">Tentar novamente</button>
+        </section>
         <section id="homeView" class="view" aria-labelledby="homeTitle">
           <div class="page-heading">
             <div>
@@ -140,6 +143,22 @@
       <div class="dialog-actions">
         <button class="secondary-button" id="cancelTaskButton" type="button">Cancelar</button>
         <button class="primary-button" type="submit">Salvar</button>
+      </div>
+    </form>
+  </dialog>
+  <dialog id="importDialog" class="task-dialog import-dialog">
+    <form id="importForm" novalidate>
+      <div class="dialog-heading">
+        <div><p class="eyebrow">DADOS LOCAIS</p><h2>Importar quadros antigos?</h2></div>
+      </div>
+      <p class="import-description">Há dados salvos neste navegador. Você pode importar os quadros para esta conta ou começar sem eles. Senhas e contas antigas não serão importadas.</p>
+      <div id="legacyProfileField" class="form-field" hidden>
+        <label for="legacyProfileSelect">Perfil local para importar</label>
+        <select id="legacyProfileSelect"></select>
+      </div>
+      <div class="dialog-actions">
+        <button id="discardLegacyButton" class="secondary-button" type="button">Começar sem importar</button>
+        <button id="importLegacyButton" class="primary-button" type="button">Importar quadros</button>
       </div>
     </form>
   </dialog>

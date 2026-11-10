@@ -1,22 +1,31 @@
-"use strict";
+import { firebaseConfig } from "./firebase-config.js";
 
-// ESTADO E ARMAZENAMENTO
-const USERS_KEY = "quadros-users-v1";
-const SESSION_KEY = "quadros-session-v1";
-const LEGACY_KEY = "quadros-kanban-v1";
+const FIREBASE_VERSION = "11.10.0";
+const BOARDS_COLLECTION = "boards";
+const LEGACY_KEYS = ["quadros-users-v1", "quadros-session-v1", "quadros-kanban-v1"];
 const THEME_KEY = "quadros-theme";
 const BOARD_COLORS = ["#16836d", "#db6b79", "#d49a35", "#4289bd", "#7b70bd", "#658c54"];
 const PRIORITY_LABELS = { baixa: "Baixa", media: "Média", alta: "Alta" };
+const MAX_BOARDS = 20;
+const MAX_COLUMNS = 20;
+const MAX_TASKS_PER_COLUMN = 100;
+const MAX_DOCUMENT_BYTES = 800_000;
+
 const elements = Object.fromEntries([
   "homeLink", "authView", "authForm", "authTitle", "authIntro", "authError", "authSubmit", "authModeToggle", "authSwitchText",
-  "nameField", "nameInput", "usernameField", "usernameInput", "emailField", "emailInput", "loginIdentifier", "passwordInput",
-  "togglePassword", "confirmField", "confirmPasswordInput", "toggleConfirmPassword", "userName", "logoutButton", "appView", "homeView",
-  "boardView", "boardGrid", "emptyBoards", "boardTitle", "activeBoardColor", "columns", "taskSearch", "taskDialog", "taskForm",
-  "taskTitleInput", "taskDescriptionInput", "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "toast",
-  "themeToggle", "themeIcon"
+  "usernameField", "usernameInput", "emailField", "emailInput", "loginIdentifier", "passwordInput", "togglePassword",
+  "confirmField", "confirmPasswordInput", "toggleConfirmPassword", "userName", "logoutButton", "appView", "loadingView",
+  "loadingMessage", "dataErrorView", "dataErrorMessage", "retryDataButton", "homeView", "boardView", "boardGrid", "emptyBoards",
+  "boardTitle", "activeBoardColor", "columns", "taskSearch", "taskDialog", "taskForm", "taskTitleInput",
+  "taskDescriptionInput", "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog", "importForm",
+  "legacyProfileField", "legacyProfileSelect", "importLegacyButton", "discardLegacyButton", "toast", "themeToggle", "themeIcon",
+  "createBoardButton", "backButton", "renameBoardButton", "changeBoardColorButton", "deleteBoardButton", "addTaskButton",
+  "closeTaskDialog", "cancelTaskButton"
 ].map((id) => [id, document.getElementById(id)]));
 
-let users = loadUsers();
+let firebaseApi = null;
+let auth = null;
+let db = null;
 let currentUser = null;
 let state = { boards: [] };
 let activeBoardId = null;
@@ -24,73 +33,47 @@ let editingTask = null;
 let draggedTask = null;
 let authMode = "login";
 let toastTimer = null;
+let authGeneration = 0;
+let boardUnsubscribe = null;
+let saveQueue = Promise.resolve();
+let importChoices = [];
+let importDialogResolver = null;
+let dataReady = false;
 
-function loadUsers() {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(USERS_KEY) || "{\"users\":[]}");
-    return parsed && Array.isArray(parsed.users) ? parsed.users : [];
-  } catch {
-    return [];
+function createId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  bytes[6] = (bytes[6] & 0x0f) | 0x40;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+function isFirebaseConfigured() {
+  const requiredValues = [firebaseConfig.apiKey, firebaseConfig.authDomain, firebaseConfig.projectId, firebaseConfig.appId];
+  return requiredValues.every((value) => typeof value === "string" && value.trim() && !value.includes("COLE_AQUI"));
+}
+
+function showAuthError(message) {
+  elements.authError.textContent = message;
+  elements.authError.hidden = false;
+}
+
+function mapFirebaseError(error, context = "auth") {
+  const code = error && error.code ? error.code : "";
+  if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found" || code === "auth/invalid-login-credentials") {
+    return "E-mail ou senha incorretos.";
   }
-}
-
-function sanitizeBoards(value) {
-  if (!value || !Array.isArray(value.boards)) return { boards: [] };
-  const boards = value.boards.filter((board) => board && typeof board.id === "string" && typeof board.name === "string" && Array.isArray(board.columns));
-  boards.forEach((board) => {
-    board.columns = board.columns.filter((column) => column && typeof column.id === "string" && typeof column.name === "string" && Array.isArray(column.tasks));
-    board.columns.forEach((column) => {
-      column.tasks = column.tasks.filter((task) => task && typeof task.id === "string" && typeof task.title === "string");
-    });
-  });
-  return { boards };
-}
-
-function readLegacyBoards() {
-  try {
-    const saved = localStorage.getItem(LEGACY_KEY);
-    return saved ? sanitizeBoards(JSON.parse(saved)) : { boards: [] };
-  } catch {
-    return { boards: [] };
-  }
-}
-
-function saveUsers() {
-  localStorage.setItem(USERS_KEY, JSON.stringify({ users }));
-}
-
-function saveState() {
-  if (!currentUser) return;
-  const userIndex = users.findIndex((user) => user.id === currentUser.id);
-  if (userIndex < 0) return;
-  users[userIndex].boards = state.boards;
-  currentUser = users[userIndex];
-  try {
-    saveUsers();
-  } catch {
-    showToast("Não foi possível salvar. Verifique o espaço disponível no navegador.");
-  }
-}
-
-function createId() { return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 9)}`; }
-function getActiveBoard() { return state.boards.find((board) => board.id === activeBoardId) || null; }
-
-// LOGIN: armazenamos hash e salt, nunca a senha original.
-function bytesToHex(bytes) { return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(""); }
-function hexToBytes(hex) { return Uint8Array.from(hex.match(/.{2}/g) || [], (part) => parseInt(part, 16)); }
-
-async function hashPassword(password, saltHex) {
-  if (!window.crypto || !window.crypto.subtle) throw new Error("Este navegador não disponibiliza a Web Crypto API nesta página.");
-  const key = await crypto.subtle.importKey("raw", new TextEncoder().encode(password), "PBKDF2", false, ["deriveBits"]);
-  const bits = await crypto.subtle.deriveBits({ name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 250000, hash: "SHA-256" }, key, 256);
-  return bytesToHex(new Uint8Array(bits));
-}
-
-function sameHash(left, right) {
-  if (left.length !== right.length) return false;
-  let difference = 0;
-  for (let index = 0; index < left.length; index += 1) difference |= left.charCodeAt(index) ^ right.charCodeAt(index);
-  return difference === 0;
+  if (code === "auth/too-many-requests") return "Muitas tentativas. Aguarde um pouco e tente novamente.";
+  if (code === "auth/network-request-failed" || !navigator.onLine) return "Falha de conexão. Verifique a internet e tente novamente.";
+  if (code === "auth/email-already-in-use") return "Não foi possível criar a conta com esses dados.";
+  if (code === "auth/invalid-email") return "Informe um e-mail válido.";
+  if (code === "auth/weak-password") return "A senha precisa ter pelo menos 8 caracteres.";
+  if (code === "auth/operation-not-allowed") return "O login por e-mail e senha ainda não foi habilitado no Firebase.";
+  if (code === "permission-denied" || code === "firestore/permission-denied") return "O Firebase recusou o acesso. Confira as regras do Firestore.";
+  if (context === "data") return "Não foi possível carregar ou salvar seus quadros. Tente novamente.";
+  return "Não foi possível concluir a operação. Confira a configuração do Firebase e tente novamente.";
 }
 
 function setAuthMode(mode) {
@@ -98,7 +81,6 @@ function setAuthMode(mode) {
   const registering = mode === "register";
   elements.authTitle.textContent = registering ? "Crie sua conta" : "Entre na sua conta";
   elements.authIntro.textContent = registering ? "Cadastre-se para organizar seus quadros e tarefas." : "Acesse seus quadros e continue organizando suas tarefas.";
-  elements.nameField.hidden = !registering;
   elements.usernameField.hidden = !registering;
   elements.emailField.hidden = !registering;
   elements.confirmField.hidden = !registering;
@@ -108,84 +90,7 @@ function setAuthMode(mode) {
   elements.authSwitchText.textContent = registering ? "Já tem uma conta?" : "Ainda não tem conta?";
   elements.authModeToggle.textContent = registering ? "Entrar" : "Cadastre-se";
   elements.authError.textContent = "";
-}
-
-async function registerUser(name, username, email, password) {
-  const normalizedEmail = email.trim().toLocaleLowerCase("pt-BR");
-  const normalizedUsername = username.trim().toLocaleLowerCase("pt-BR");
-  if (users.some((user) => user.email === normalizedEmail)) throw new Error("Já existe uma conta com este e-mail.");
-  if (users.some((user) => user.username && user.username.toLocaleLowerCase("pt-BR") === normalizedUsername)) throw new Error("Este nome de usuário já está em uso.");
-  const salt = crypto.getRandomValues(new Uint8Array(16));
-  const saltHex = bytesToHex(salt);
-  const user = {
-    id: createId(), name: name.trim(), username: normalizedUsername, email: normalizedEmail,
-    salt: saltHex, passwordHash: await hashPassword(password, saltHex),
-    boards: users.length === 0 ? readLegacyBoards().boards : []
-  };
-  users.push(user);
-  try {
-    saveUsers();
-  } catch {
-    users.pop();
-    throw new Error("Não foi possível criar a conta no armazenamento deste navegador.");
-  }
-  if (user.boards.length > 0) {
-    try { localStorage.removeItem(LEGACY_KEY); } catch { /* A cópia da conta já foi salva. */ }
-  }
-  await startSession(user);
-}
-
-async function loginUser(identifier, password) {
-  const normalizedIdentifier = identifier.trim().toLocaleLowerCase("pt-BR");
-  const user = users.find((item) => item.email === normalizedIdentifier || item.username?.toLocaleLowerCase("pt-BR") === normalizedIdentifier);
-  if (!user) throw new Error("E-mail/nome de usuário ou senha incorretos.");
-  const passwordHash = await hashPassword(password, user.salt);
-  if (!sameHash(passwordHash, user.passwordHash)) throw new Error("E-mail/nome de usuário ou senha incorretos.");
-  await startSession(user);
-}
-
-async function startSession(user) {
-  try { localStorage.setItem(SESSION_KEY, user.id); }
-  catch { throw new Error("Não foi possível manter a sessão neste navegador."); }
-  currentUser = user;
-  state = sanitizeBoards({ boards: user.boards || [] });
-  elements.authView.hidden = true;
-  elements.appView.hidden = false;
-  elements.userName.hidden = false;
-  elements.logoutButton.hidden = false;
-  elements.userName.textContent = user.name;
-  activeBoardId = null;
-  elements.boardView.hidden = true;
-  elements.homeView.hidden = false;
-  renderBoards();
-}
-
-function clearSessionView() {
-  currentUser = null;
-  state = { boards: [] };
-  activeBoardId = null;
-  elements.appView.hidden = true;
-  elements.userName.hidden = true;
-  elements.logoutButton.hidden = true;
-  elements.authView.hidden = false;
-  elements.authForm.reset();
-  setAuthMode("login");
-}
-
-function logoutUser() {
-  saveState();
-  try { localStorage.removeItem(SESSION_KEY); }
-  catch { showToast("Não foi possível encerrar a sessão neste navegador."); return; }
-  clearSessionView();
-}
-
-function verifyRestoredSession() {
-  if (!currentUser) return;
-  try {
-    if (localStorage.getItem(SESSION_KEY) !== currentUser.id) clearSessionView();
-  } catch {
-    clearSessionView();
-  }
+  elements.authError.hidden = true;
 }
 
 function setPasswordVisibility(input, button, visibleLabel, hiddenLabel) {
@@ -196,31 +101,410 @@ function setPasswordVisibility(input, button, visibleLabel, hiddenLabel) {
   button.setAttribute("aria-pressed", String(visible));
 }
 
-// KANBAN: os dados do quadro ficam no registro do usuário atual.
+function setAuthBusy(isBusy) {
+  elements.authSubmit.disabled = isBusy;
+  elements.authSubmit.textContent = isBusy ? "Aguarde..." : authMode === "register" ? "Criar conta" : "Entrar";
+}
+
+async function handleAuthSubmit(event) {
+  event.preventDefault();
+  elements.authError.textContent = "";
+  elements.authError.hidden = true;
+  const password = elements.passwordInput.value;
+  const email = authMode === "register" ? elements.emailInput.value.trim() : elements.loginIdentifier.value.trim();
+  if (authMode === "register") {
+    if (!elements.usernameInput.value.trim()) { showAuthError("Informe um nome de usuário."); return; }
+    if (elements.usernameInput.value.trim().length > 40) { showAuthError("O nome de usuário pode ter no máximo 40 caracteres."); return; }
+    if (!elements.emailInput.value.trim()) { showAuthError("Informe seu e-mail."); return; }
+  } else if (!email) {
+    showAuthError("Informe seu e-mail.");
+    return;
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showAuthError("Informe um e-mail válido."); return; }
+  if (!password.trim()) { showAuthError("A senha não pode ficar vazia ou conter apenas espaços."); return; }
+  if (authMode === "register" && password.length < 8) { showAuthError("A senha precisa ter pelo menos 8 caracteres."); return; }
+  if (authMode === "register" && password !== elements.confirmPasswordInput.value) { showAuthError("A confirmação de senha não corresponde."); return; }
+  if (!auth || !firebaseApi) {
+    showAuthError("Configure o Firebase em firebase-config.js e abra o site pelo Live Server.");
+    return;
+  }
+
+  setAuthBusy(true);
+  try {
+    if (authMode === "register") await registerUser(email, password, elements.usernameInput.value.trim());
+    else await loginUser(email, password);
+  } catch (error) {
+    showAuthError(mapFirebaseError(error));
+  } finally {
+    setAuthBusy(false);
+  }
+}
+
+async function registerUser(email, password, displayName) {
+  if (!displayName) throw new Error("display-name-required");
+  if (displayName.length > 40) throw new Error("display-name-too-long");
+  if (password.length < 8) throw { code: "auth/weak-password" };
+  const credentials = await firebaseApi.createUserWithEmailAndPassword(auth, email, password);
+  await firebaseApi.updateProfile(credentials.user, { displayName });
+  elements.userName.textContent = displayName;
+}
+
+async function loginUser(email, password) {
+  await firebaseApi.signInWithEmailAndPassword(auth, email, password);
+}
+
+function showSignedOut() {
+  currentUser = null;
+  dataReady = false;
+  stopBoardListener();
+  state = { boards: [] };
+  activeBoardId = null;
+  elements.appView.hidden = true;
+  elements.userName.hidden = true;
+  elements.logoutButton.hidden = true;
+  elements.authView.hidden = false;
+  elements.authForm.reset();
+  setAuthMode("login");
+}
+
+async function handleAuthStateChanged(user) {
+  const generation = ++authGeneration;
+  if (!user) {
+    showSignedOut();
+    return;
+  }
+
+  stopBoardListener();
+  currentUser = user;
+  dataReady = false;
+  activeBoardId = null;
+  elements.authView.hidden = true;
+  elements.appView.hidden = false;
+  elements.userName.hidden = false;
+  elements.logoutButton.hidden = false;
+  elements.userName.textContent = user.displayName || user.email || "Usuário";
+  showLoading("Carregando seus quadros...");
+
+  try {
+    await loadOrCreateUserBoards(user, generation);
+  } catch (error) {
+    if (generation === authGeneration) showDataError(mapFirebaseError(error, "data"));
+  }
+}
+
+function showLoading(message) {
+  elements.loadingMessage.textContent = message;
+  elements.loadingView.hidden = false;
+  elements.dataErrorView.hidden = true;
+  elements.homeView.hidden = true;
+  elements.boardView.hidden = true;
+}
+
+function showDataError(message) {
+  dataReady = false;
+  elements.loadingView.hidden = true;
+  elements.dataErrorView.hidden = false;
+  elements.dataErrorMessage.textContent = message;
+  elements.homeView.hidden = true;
+  elements.boardView.hidden = true;
+}
+
+function showApp() {
+  dataReady = true;
+  elements.loadingView.hidden = true;
+  elements.dataErrorView.hidden = true;
+  elements.homeView.hidden = false;
+  elements.boardView.hidden = true;
+  renderBoards();
+}
+
+function handleAuthObserverError(error) {
+  showSignedOut();
+  showAuthError(mapFirebaseError(error));
+}
+
+async function logoutUser() {
+  if (!auth || !firebaseApi) return;
+  elements.logoutButton.disabled = true;
+  try {
+    const saveStatus = await Promise.race([
+      saveQueue.then(() => "saved", () => "failed"),
+      new Promise((resolve) => window.setTimeout(() => resolve("pending"), 5000))
+    ]);
+    if (saveStatus === "pending") showToast("Uma gravação ainda está pendente. Confira a conexão antes de continuar.");
+    if (saveStatus === "failed") showToast("Uma alteração pode não ter sido salva antes de sair.");
+  } catch (error) {
+    showToast(mapFirebaseError(error, "data"));
+  }
+  try {
+    await firebaseApi.signOut(auth);
+  } catch (error) {
+    showToast(mapFirebaseError(error));
+  } finally {
+    elements.logoutButton.disabled = false;
+  }
+}
+
+function stopBoardListener() {
+  if (boardUnsubscribe) boardUnsubscribe();
+  boardUnsubscribe = null;
+}
+
+// Valida toda a estrutura antes de usar dados vindos do banco ou do navegador.
+function validateBoards(boards) {
+  if (!Array.isArray(boards) || boards.length > MAX_BOARDS) return null;
+  for (const board of boards) {
+    if (!board || typeof board.id !== "string" || board.id.length > 80) return null;
+    if (typeof board.name !== "string" || !board.name.trim() || board.name.length > 100) return null;
+    if (typeof board.color !== "string" || !/^#[0-9a-fA-F]{6}$/.test(board.color)) return null;
+    if (!Array.isArray(board.columns) || board.columns.length > MAX_COLUMNS) return null;
+    for (const column of board.columns) {
+      if (!column || typeof column.id !== "string" || column.id.length > 80) return null;
+      if (typeof column.name !== "string" || !column.name.trim() || column.name.length > 60) return null;
+      if (!Array.isArray(column.tasks) || column.tasks.length > MAX_TASKS_PER_COLUMN) return null;
+      for (const task of column.tasks) {
+        if (!task || typeof task.id !== "string" || task.id.length > 80) return null;
+        if (typeof task.title !== "string" || !task.title.trim() || task.title.length > 120) return null;
+        if (typeof task.description !== "string" || task.description.length > 300) return null;
+        if (!Object.hasOwn(PRIORITY_LABELS, task.priority)) return null;
+        if (typeof task.dueDate !== "string" || (task.dueDate && !/^\d{4}-\d{2}-\d{2}$/.test(task.dueDate))) return null;
+      }
+    }
+  }
+  try {
+    if (new TextEncoder().encode(JSON.stringify(boards)).length > MAX_DOCUMENT_BYTES) return null;
+  } catch {
+    return null;
+  }
+  return boards;
+}
+
+function createDefaultBoards() {
+  return [{
+    id: createId(),
+    name: "Meu quadro",
+    color: BOARD_COLORS[0],
+    columns: [
+      { id: createId(), name: "A Fazer", tasks: [] },
+      { id: createId(), name: "Em Andamento", tasks: [] },
+      { id: createId(), name: "Concluído", tasks: [] }
+    ]
+  }];
+}
+
+function normalizeLegacyBoards(value) {
+  if (!value || !Array.isArray(value.boards)) return null;
+  const boards = [];
+  for (const oldBoard of value.boards) {
+    if (!oldBoard || typeof oldBoard.name !== "string" || !Array.isArray(oldBoard.columns)) continue;
+    const columns = [];
+    for (const oldColumn of oldBoard.columns) {
+      if (!oldColumn || typeof oldColumn.name !== "string" || !Array.isArray(oldColumn.tasks)) continue;
+      const tasks = oldColumn.tasks.filter((task) => task && typeof task.title === "string" && task.title.trim().length <= 120)
+        .map((task) => ({
+          id: createId(), title: task.title.trim(),
+          description: typeof task.description === "string" ? task.description.slice(0, 300) : "",
+          priority: Object.hasOwn(PRIORITY_LABELS, task.priority) ? task.priority : "media",
+          dueDate: typeof task.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(task.dueDate) ? task.dueDate : ""
+        }));
+      columns.push({ id: createId(), name: oldColumn.name.trim().slice(0, 60) || "Coluna", tasks });
+    }
+    boards.push({
+      id: createId(), name: oldBoard.name.trim().slice(0, 100) || "Quadro importado",
+      color: typeof oldBoard.color === "string" && /^#[0-9a-fA-F]{6}$/.test(oldBoard.color) ? oldBoard.color : BOARD_COLORS[0],
+      columns
+    });
+    if (boards.length >= MAX_BOARDS) break;
+  }
+  return validateBoards(boards);
+}
+
+function readLegacyOptions() {
+  let localUsers = [];
+  let hadLocalData = false;
+  try {
+    hadLocalData = LEGACY_KEYS.some((key) => localStorage.getItem(key) !== null);
+    const parsed = JSON.parse(localStorage.getItem("quadros-users-v1") || "null");
+    if (parsed && Array.isArray(parsed.users)) localUsers = parsed.users;
+  } catch {
+    localUsers = [];
+  }
+
+  const profiles = localUsers.map((user, index) => {
+    const boards = normalizeLegacyBoards({ boards: user && Array.isArray(user.boards) ? user.boards : [] });
+    return {
+      label: user && (user.name || user.username || user.email) ? String(user.name || user.username || user.email).slice(0, 80) : `Perfil local ${index + 1}`,
+      boards
+    };
+  }).filter((profile) => profile.boards && profile.boards.length > 0);
+
+  if (profiles.length > 0) return { profiles, hadLocalData };
+  try {
+    const legacy = JSON.parse(localStorage.getItem("quadros-kanban-v1") || "null");
+    const boards = normalizeLegacyBoards(legacy);
+    if (boards && boards.length > 0) return { profiles: [{ label: "Quadros antigos", boards }], hadLocalData };
+  } catch {
+    // Dados antigos malformados não impedem o login nem a criação de um quadro novo.
+  }
+  return { profiles: [], hadLocalData };
+}
+
+function chooseLegacyData(options) {
+  if (!options.hadLocalData) return Promise.resolve({ boards: createDefaultBoards(), clearLegacy: false });
+  importChoices = options.profiles;
+  elements.legacyProfileField.hidden = importChoices.length < 2;
+  elements.legacyProfileSelect.replaceChildren();
+  importChoices.forEach((profile, index) => {
+    const option = document.createElement("option");
+    option.value = String(index);
+    option.textContent = profile.label;
+    elements.legacyProfileSelect.append(option);
+  });
+  elements.importLegacyButton.hidden = importChoices.length === 0;
+  elements.importDialog.showModal();
+  return new Promise((resolve) => { importDialogResolver = resolve; });
+}
+
+function finishImportChoice(importData) {
+  if (!importDialogResolver) return;
+  const resolve = importDialogResolver;
+  importDialogResolver = null;
+  elements.importDialog.close();
+  resolve(importData);
+}
+
+function clearLegacyData() {
+  LEGACY_KEYS.forEach((key) => {
+    try { localStorage.removeItem(key); } catch { /* A cópia confirmada no Firestore permanece intacta. */ }
+  });
+}
+
+function makeDocumentData(uid, boards) {
+  return { ownerUid: uid, schemaVersion: 1, boards, updatedAt: firebaseApi.serverTimestamp() };
+}
+
+function validateDocumentData(data, uid) {
+  if (!data || data.ownerUid !== uid || data.schemaVersion !== 1) return null;
+  return validateBoards(data.boards);
+}
+
+async function loadOrCreateUserBoards(user, generation) {
+  const reference = firebaseApi.doc(db, BOARDS_COLLECTION, user.uid);
+  const snapshot = await firebaseApi.getDoc(reference);
+  if (generation !== authGeneration || !currentUser || currentUser.uid !== user.uid) return;
+
+  if (snapshot.exists()) {
+    const boards = validateDocumentData(snapshot.data(), user.uid);
+    if (!boards) throw new Error("Os dados deste documento não correspondem ao formato suportado.");
+    state = { boards };
+    subscribeToUserBoards(reference, user.uid, generation);
+    showApp();
+    return;
+  }
+
+  const choice = await chooseLegacyData(readLegacyOptions());
+  if (generation !== authGeneration || !currentUser || currentUser.uid !== user.uid) return;
+  const selectedBoards = choice.boards.length > 0 ? choice.boards : createDefaultBoards();
+  const validatedBoards = validateBoards(selectedBoards);
+  if (!validatedBoards) throw new Error("Os dados selecionados para importar ultrapassam os limites permitidos.");
+  const documentData = makeDocumentData(user.uid, validatedBoards);
+  const created = await firebaseApi.runTransaction(db, async (transaction) => {
+    const latest = await transaction.get(reference);
+    if (latest.exists()) return false;
+    transaction.set(reference, documentData);
+    return true;
+  });
+  if (generation !== authGeneration || !currentUser || currentUser.uid !== user.uid) return;
+  if (created && choice.clearLegacy) clearLegacyData();
+  const savedSnapshot = await firebaseApi.getDoc(reference);
+  const boards = savedSnapshot.exists() ? validateDocumentData(savedSnapshot.data(), user.uid) : null;
+  if (!boards) throw new Error("Não foi possível confirmar os dados iniciais do Firestore.");
+  state = { boards };
+  subscribeToUserBoards(reference, user.uid, generation);
+  showApp();
+}
+
+function subscribeToUserBoards(reference, uid, generation) {
+  stopBoardListener();
+  boardUnsubscribe = firebaseApi.onSnapshot(reference, (snapshot) => {
+    if (generation !== authGeneration || !currentUser || currentUser.uid !== uid) return;
+    if (!snapshot.exists()) {
+      showDataError("O documento dos seus quadros não existe mais. Tente novamente.");
+      return;
+    }
+    const boards = validateDocumentData(snapshot.data(), uid);
+    if (!boards) {
+      showDataError("Os dados recebidos do Firestore estão inválidos e não foram exibidos.");
+      return;
+    }
+    state = { boards };
+    if (!dataReady) showApp();
+    else if (activeBoardId) renderColumns();
+    else renderBoards();
+  }, (error) => {
+    if (generation === authGeneration) showDataError(mapFirebaseError(error, "data"));
+  });
+}
+
+async function retryLoadingData() {
+  if (!currentUser) return;
+  const generation = authGeneration;
+  showLoading("Carregando seus quadros...");
+  try {
+    await loadOrCreateUserBoards(currentUser, generation);
+  } catch (error) {
+    if (generation === authGeneration) showDataError(mapFirebaseError(error, "data"));
+  }
+}
+
+async function persistState() {
+  if (!currentUser || !dataReady || !db || !firebaseApi) return;
+  if (!navigator.onLine) {
+    showToast("Sem conexão. A alteração ainda não foi sincronizada com o Firebase.");
+    return;
+  }
+  const boards = validateBoards(state.boards);
+  if (!boards) {
+    showToast("Os dados excedem os limites aceitos e não foram salvos.");
+    return;
+  }
+  const uid = currentUser.uid;
+  const capturedBoards = JSON.parse(JSON.stringify(boards));
+  elements.loadingMessage.textContent = "Salvando alterações...";
+  elements.loadingView.hidden = false;
+  saveQueue = saveQueue.catch(() => {}).then(async () => {
+    if (!currentUser || currentUser.uid !== uid) return;
+    await firebaseApi.setDoc(firebaseApi.doc(db, BOARDS_COLLECTION, uid), makeDocumentData(uid, capturedBoards));
+  });
+  try {
+    await saveQueue;
+    elements.loadingView.hidden = true;
+  } catch (error) {
+    elements.loadingView.hidden = true;
+    showToast(mapFirebaseError(error, "data"));
+  }
+}
+
 function createBoard(name, color = BOARD_COLORS[0]) {
-  const board = {
+  state.boards.push({
     id: createId(), name, color,
     columns: [
       { id: createId(), name: "A Fazer", tasks: [] },
       { id: createId(), name: "Em Andamento", tasks: [] },
       { id: createId(), name: "Concluído", tasks: [] }
     ]
-  };
-  state.boards.push(board);
-  saveState();
+  });
   renderBoards();
+  void persistState();
 }
 
 function createTask(column, title, details = {}) {
   column.tasks.push({
-    id: createId(),
-    title,
-    description: details.description || "",
-    priority: details.priority || "media",
-    dueDate: details.dueDate || ""
+    id: createId(), title, description: details.description || "",
+    priority: details.priority || "media", dueDate: details.dueDate || ""
   });
-  saveState();
   renderColumns();
+  void persistState();
 }
 
 function renderBoards() {
@@ -229,7 +513,7 @@ function renderBoards() {
   state.boards.forEach((board) => {
     const card = document.createElement("article");
     card.className = "board-card";
-    card.style.setProperty("--board-color", board.color || BOARD_COLORS[0]);
+    card.style.setProperty("--board-color", board.color);
     card.tabIndex = 0;
     card.setAttribute("role", "button");
     card.setAttribute("aria-label", `Abrir quadro ${board.name}`);
@@ -324,9 +608,9 @@ function createColumnElement(column) {
   form.append(input, addButton);
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const titleValue = input.value.trim();
-    if (!titleValue) { input.focus(); return; }
-    createTask(column, titleValue);
+    const taskTitle = input.value.trim();
+    if (!taskTitle) { input.focus(); return; }
+    createTask(column, taskTitle);
     showToast("Tarefa adicionada.");
   });
   section.append(header, list, form);
@@ -356,8 +640,8 @@ function createTaskElement(task, columnId) {
   const badges = document.createElement("div");
   badges.className = "task-badges";
   const priority = document.createElement("span");
-  priority.className = `badge priority-${task.priority || "media"}`;
-  priority.textContent = PRIORITY_LABELS[task.priority] || PRIORITY_LABELS.media;
+  priority.className = `badge priority-${task.priority}`;
+  priority.textContent = PRIORITY_LABELS[task.priority];
   badges.append(priority);
   if (task.dueDate) {
     const dueDate = document.createElement("span");
@@ -398,20 +682,23 @@ function createIconButton(symbol, label, action, extraClass = "") {
   return button;
 }
 
+function getActiveBoard() { return state.boards.find((board) => board.id === activeBoardId) || null; }
+
 function openBoard(boardId) {
+  if (!dataReady || !currentUser) return;
   activeBoardId = boardId;
   const board = getActiveBoard();
   if (!board) return;
   elements.homeView.hidden = true;
   elements.boardView.hidden = false;
   elements.boardTitle.textContent = board.name;
-  elements.activeBoardColor.style.setProperty("--board-color", board.color || BOARD_COLORS[0]);
-  elements.activeBoardColor.style.backgroundColor = board.color || BOARD_COLORS[0];
+  elements.activeBoardColor.style.backgroundColor = board.color;
   elements.taskSearch.value = "";
   renderColumns();
 }
 
 function returnHome() {
+  if (!currentUser || !dataReady) return;
   activeBoardId = null;
   elements.boardView.hidden = true;
   elements.homeView.hidden = false;
@@ -419,19 +706,19 @@ function returnHome() {
 }
 
 function goHome() {
-  if (currentUser) returnHome();
-  else setAuthMode("login");
+  if (currentUser && dataReady) returnHome();
+  else if (!currentUser) setAuthMode("login");
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
 function renameBoard(board) {
   const name = window.prompt("Qual será o novo nome do quadro?", board.name);
   if (name === null) return;
-  if (!name.trim()) { showToast("O nome do quadro não pode ficar vazio."); return; }
+  if (!name.trim() || name.trim().length > 100) { showToast("Informe um nome com até 100 caracteres."); return; }
   board.name = name.trim();
-  saveState();
   renderBoards();
   if (board.id === activeBoardId) elements.boardTitle.textContent = board.name;
+  void persistState();
 }
 
 function changeBoardColor(board) {
@@ -439,54 +726,55 @@ function changeBoardColor(board) {
   if (color === null) return;
   if (!/^#[0-9a-fA-F]{6}$/.test(color.trim())) { showToast("Use uma cor hexadecimal válida, como #16836d."); return; }
   board.color = color.trim();
-  saveState();
   renderBoards();
   if (board.id === activeBoardId) elements.activeBoardColor.style.backgroundColor = board.color;
+  void persistState();
 }
 
 function deleteBoard(board) {
   if (!window.confirm(`Excluir o quadro "${board.name}" e todas as suas tarefas? Esta ação não pode ser desfeita.`)) return;
   state.boards = state.boards.filter((item) => item.id !== board.id);
-  saveState();
   if (activeBoardId === board.id) returnHome(); else renderBoards();
+  void persistState();
   showToast("Quadro excluído.");
 }
 
 function addColumn() {
   const name = window.prompt("Nome da nova coluna:");
   if (name === null) return;
-  if (!name.trim()) { showToast("O nome da coluna não pode ficar vazio."); return; }
+  if (!name.trim() || name.trim().length > 60) { showToast("Informe um nome de coluna com até 60 caracteres."); return; }
   getActiveBoard().columns.push({ id: createId(), name: name.trim(), tasks: [] });
-  saveState();
   renderColumns();
+  void persistState();
 }
 
 function renameColumn(column) {
   const name = window.prompt("Qual será o novo nome da coluna?", column.name);
   if (name === null) return;
-  if (!name.trim()) { showToast("O nome da coluna não pode ficar vazio."); return; }
+  if (!name.trim() || name.trim().length > 60) { showToast("Informe um nome de coluna com até 60 caracteres."); return; }
   column.name = name.trim();
-  saveState();
   renderColumns();
+  void persistState();
 }
 
 function deleteColumn(column) {
   if (!window.confirm(`Excluir a coluna "${column.name}" e todas as tarefas dela?`)) return;
   const board = getActiveBoard();
   board.columns = board.columns.filter((item) => item.id !== column.id);
-  saveState();
   renderColumns();
+  void persistState();
   showToast("Coluna excluída.");
 }
 
 // MODAL
 function openTaskModal(columnId, task = null) {
+  if (!currentUser || !dataReady) return;
   editingTask = task ? { columnId, taskId: task.id } : { columnId, taskId: null };
   elements.taskDialogTitle.textContent = task ? "Editar tarefa" : "Adicionar tarefa";
   elements.taskTitleInput.value = task ? task.title : "";
-  elements.taskDescriptionInput.value = task ? task.description || "" : "";
-  elements.taskPriorityInput.value = task ? task.priority || "media" : "media";
-  elements.taskDueDateInput.value = task ? task.dueDate || "" : "";
+  elements.taskDescriptionInput.value = task ? task.description : "";
+  elements.taskPriorityInput.value = task ? task.priority : "media";
+  elements.taskDueDateInput.value = task ? task.dueDate : "";
   elements.taskError.textContent = "";
   elements.taskDialog.showModal();
   elements.taskTitleInput.focus();
@@ -494,17 +782,23 @@ function openTaskModal(columnId, task = null) {
 
 function saveTaskFromDialog(event) {
   event.preventDefault();
-  if (!editingTask) return;
+  if (!currentUser || !dataReady || !editingTask) return;
   const title = elements.taskTitleInput.value.trim();
-  if (!title) { elements.taskError.textContent = "Informe um título para a tarefa."; elements.taskTitleInput.focus(); return; }
+  const description = elements.taskDescriptionInput.value.trim();
+  if (!title || title.length > 120) {
+    elements.taskError.textContent = "Informe um título com até 120 caracteres.";
+    elements.taskTitleInput.focus();
+    return;
+  }
+  if (description.length > 300) {
+    elements.taskError.textContent = "A descrição pode ter no máximo 300 caracteres.";
+    elements.taskDescriptionInput.focus();
+    return;
+  }
   const board = getActiveBoard();
   const column = board && board.columns.find((item) => item.id === editingTask.columnId);
   if (!column) return;
-  const details = {
-    description: elements.taskDescriptionInput.value.trim(),
-    priority: elements.taskPriorityInput.value,
-    dueDate: elements.taskDueDateInput.value
-  };
+  const details = { description, priority: elements.taskPriorityInput.value, dueDate: elements.taskDueDateInput.value };
   if (editingTask.taskId) {
     const task = column.tasks.find((item) => item.id === editingTask.taskId);
     if (task) Object.assign(task, { title, ...details });
@@ -513,19 +807,20 @@ function saveTaskFromDialog(event) {
   }
   editingTask = null;
   elements.taskDialog.close();
-  saveState();
   renderColumns();
+  void persistState();
   showToast("Tarefa salva.");
 }
 
 function deleteTask(columnId, taskId) {
+  if (!currentUser || !dataReady) return;
   const board = getActiveBoard();
   const column = board && board.columns.find((item) => item.id === columnId);
   const task = column && column.tasks.find((item) => item.id === taskId);
   if (!task || !window.confirm(`Excluir a tarefa "${task.title}"?`)) return;
   column.tasks = column.tasks.filter((item) => item.id !== taskId);
-  saveState();
   renderColumns();
+  void persistState();
   showToast("Tarefa excluída.");
 }
 
@@ -556,12 +851,12 @@ function handleDragLeave(event) {
 
 function handleDrop(event) {
   event.preventDefault();
-  const targetList = event.currentTarget;
-  targetList.closest(".column").classList.remove("drag-over");
-  if (!draggedTask) return;
+  const targetColumnElement = event.currentTarget.closest(".column");
+  targetColumnElement.classList.remove("drag-over");
+  if (!currentUser || !dataReady || !draggedTask) return;
   const board = getActiveBoard();
-  const sourceColumn = board.columns.find((column) => column.id === draggedTask.columnId);
-  const targetColumn = board.columns.find((column) => column.id === targetList.dataset.columnId);
+  const sourceColumn = board && board.columns.find((column) => column.id === draggedTask.columnId);
+  const targetColumn = board && board.columns.find((column) => column.id === targetColumnElement.dataset.columnId);
   if (!sourceColumn || !targetColumn) return;
   const sourceIndex = sourceColumn.tasks.findIndex((task) => task.id === draggedTask.taskId);
   if (sourceIndex < 0) return;
@@ -570,8 +865,8 @@ function handleDrop(event) {
   let targetIndex = targetCard ? targetColumn.tasks.findIndex((item) => item.id === targetCard.dataset.taskId) : targetColumn.tasks.length;
   if (targetIndex < 0) targetIndex = targetColumn.tasks.length;
   targetColumn.tasks.splice(targetIndex, 0, task);
-  saveState();
   renderColumns();
+  void persistState();
 }
 
 function applySearch() {
@@ -591,7 +886,7 @@ function showToast(message) {
   elements.toast.textContent = message;
   elements.toast.classList.add("visible");
   window.clearTimeout(toastTimer);
-  toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 2600);
+  toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 3000);
 }
 
 function setTheme(theme) {
@@ -599,61 +894,67 @@ function setTheme(theme) {
   document.body.classList.toggle("dark-theme", isDark);
   elements.themeIcon.textContent = isDark ? "☀" : "☾";
   elements.themeToggle.setAttribute("aria-label", isDark ? "Ativar tema claro" : "Ativar tema escuro");
-  try { localStorage.setItem(THEME_KEY, theme); } catch { /* O tema permanece ativo até fechar esta página. */ }
+  try { localStorage.setItem(THEME_KEY, theme); } catch { /* O tema permanece aplicado até fechar a página. */ }
+}
+
+function initializeImportDialog() {
+  elements.importLegacyButton.addEventListener("click", () => {
+    const selected = importChoices[Number(elements.legacyProfileSelect.value)] || importChoices[0];
+    finishImportChoice({ boards: selected ? selected.boards : [], clearLegacy: true });
+  });
+  elements.discardLegacyButton.addEventListener("click", () => finishImportChoice({ boards: [], clearLegacy: true }));
+  elements.importDialog.addEventListener("cancel", (event) => event.preventDefault());
+}
+
+function initializeFirebase() {
+  if (!isFirebaseConfigured()) {
+    showAuthError("Antes de entrar, configure seu firebaseConfig em firebase-config.js. Consulte o README.md.");
+    return;
+  }
+  const baseUrl = `https://www.gstatic.com/firebasejs/${FIREBASE_VERSION}`;
+  Promise.all([
+    import(`${baseUrl}/firebase-app.js`),
+    import(`${baseUrl}/firebase-auth.js`),
+    import(`${baseUrl}/firebase-firestore.js`)
+  ]).then(async ([appSdk, authSdk, firestoreSdk]) => {
+    firebaseApi = { ...authSdk, ...firestoreSdk };
+    const app = appSdk.initializeApp(firebaseConfig);
+    auth = authSdk.getAuth(app);
+    db = firestoreSdk.getFirestore(app);
+    await authSdk.setPersistence(auth, authSdk.indexedDBLocalPersistence);
+    authSdk.onAuthStateChanged(auth, handleAuthStateChanged, handleAuthObserverError);
+  }).catch((error) => {
+    showAuthError(mapFirebaseError(error));
+  });
 }
 
 // EVENTOS E INICIALIZACAO
-elements.authForm.addEventListener("submit", async (event) => {
-  event.preventDefault();
-  elements.authError.textContent = "";
-  const password = elements.passwordInput.value;
-  try {
-    if (authMode === "register") {
-      const name = elements.nameInput.value.trim();
-      const username = elements.usernameInput.value.trim();
-      const email = elements.emailInput.value.trim();
-      if (!name) throw new Error("Informe seu nome.");
-      if (!username) throw new Error("Informe um nome de usuário.");
-      if (!email || !elements.emailInput.validity.valid) throw new Error("Informe um e-mail válido.");
-      if (!password.trim()) throw new Error("A senha não pode ficar vazia ou conter apenas espaços.");
-      if (password.length < 8) throw new Error("A senha precisa ter pelo menos 8 caracteres.");
-      if (password !== elements.confirmPasswordInput.value) throw new Error("A confirmação de senha não corresponde.");
-      await registerUser(name, username, email, password);
-      showToast("Conta criada com sucesso.");
-    } else {
-      const identifier = elements.loginIdentifier.value.trim();
-      if (!identifier) throw new Error("Preencha o e-mail ou nome de usuário.");
-      if (!password.trim()) throw new Error("A senha não pode ficar vazia ou conter apenas espaços.");
-      await loginUser(identifier, password);
-    }
-  } catch (error) {
-    elements.authError.textContent = error.message || "Não foi possível concluir a autenticação.";
-  }
-});
-
-elements.homeLink.addEventListener("click", (event) => { event.preventDefault(); goHome(); });
+elements.authForm.addEventListener("submit", handleAuthSubmit);
 elements.authModeToggle.addEventListener("click", () => setAuthMode(authMode === "login" ? "register" : "login"));
-elements.logoutButton.addEventListener("click", logoutUser);
 elements.togglePassword.addEventListener("click", () => setPasswordVisibility(elements.passwordInput, elements.togglePassword, "Mostrar senha", "Ocultar senha"));
 elements.toggleConfirmPassword.addEventListener("click", () => setPasswordVisibility(elements.confirmPasswordInput, elements.toggleConfirmPassword, "Mostrar confirmação de senha", "Ocultar confirmação de senha"));
-document.getElementById("createBoardButton").addEventListener("click", () => {
+elements.homeLink.addEventListener("click", (event) => { event.preventDefault(); goHome(); });
+elements.logoutButton.addEventListener("click", logoutUser);
+elements.retryDataButton.addEventListener("click", retryLoadingData);
+elements.createBoardButton.addEventListener("click", () => {
+  if (!currentUser || !dataReady) return;
   const name = window.prompt("Qual será o nome do quadro?");
   if (name === null) return;
-  if (!name.trim()) { showToast("O nome do quadro não pode ficar vazio."); return; }
+  if (!name.trim() || name.trim().length > 100) { showToast("Informe um nome para o quadro com até 100 caracteres."); return; }
   createBoard(name.trim());
 });
-document.getElementById("backButton").addEventListener("click", returnHome);
-document.getElementById("renameBoardButton").addEventListener("click", () => { const board = getActiveBoard(); if (board) renameBoard(board); });
-document.getElementById("changeBoardColorButton").addEventListener("click", () => { const board = getActiveBoard(); if (board) changeBoardColor(board); });
-document.getElementById("deleteBoardButton").addEventListener("click", () => { const board = getActiveBoard(); if (board) deleteBoard(board); });
-document.getElementById("addTaskButton").addEventListener("click", () => {
+elements.backButton.addEventListener("click", returnHome);
+elements.renameBoardButton.addEventListener("click", () => { const board = getActiveBoard(); if (board) renameBoard(board); });
+elements.changeBoardColorButton.addEventListener("click", () => { const board = getActiveBoard(); if (board) changeBoardColor(board); });
+elements.deleteBoardButton.addEventListener("click", () => { const board = getActiveBoard(); if (board) deleteBoard(board); });
+elements.addTaskButton.addEventListener("click", () => {
   const board = getActiveBoard();
   if (!board || board.columns.length === 0) { showToast("Crie uma coluna antes de adicionar tarefas."); return; }
   const todoColumn = board.columns.find((column) => column.name.trim().toLocaleLowerCase("pt-BR") === "a fazer") || board.columns[0];
   openTaskModal(todoColumn.id);
 });
-document.getElementById("closeTaskDialog").addEventListener("click", () => elements.taskDialog.close());
-document.getElementById("cancelTaskButton").addEventListener("click", () => elements.taskDialog.close());
+elements.closeTaskDialog.addEventListener("click", () => elements.taskDialog.close());
+elements.cancelTaskButton.addEventListener("click", () => elements.taskDialog.close());
 elements.taskForm.addEventListener("submit", saveTaskFromDialog);
 elements.taskDialog.addEventListener("close", () => { editingTask = null; });
 elements.taskDialog.addEventListener("click", (event) => { if (event.target === elements.taskDialog) elements.taskDialog.close(); });
@@ -664,23 +965,12 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && elements.taskDialog.open) { event.preventDefault(); elements.taskDialog.close(); return; }
   if (event.key === "/" && !elements.boardView.hidden && !/INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName)) { event.preventDefault(); elements.taskSearch.focus(); }
 });
-window.addEventListener("pageshow", verifyRestoredSession);
-window.addEventListener("storage", (event) => {
-  if (currentUser && event.key === SESSION_KEY && event.newValue !== currentUser.id) clearSessionView();
-});
-
-try { setTheme(localStorage.getItem(THEME_KEY) || "light"); } catch { setTheme("light"); }
-try {
-  const sessionId = localStorage.getItem(SESSION_KEY);
-  const savedUser = users.find((user) => user.id === sessionId);
-  if (savedUser) {
-    currentUser = savedUser;
-    state = sanitizeBoards({ boards: savedUser.boards || [] });
-    elements.authView.hidden = true;
-    elements.appView.hidden = false;
-    elements.userName.hidden = false;
-    elements.logoutButton.hidden = false;
-    elements.userName.textContent = savedUser.name;
-    renderBoards();
+window.addEventListener("popstate", () => {
+  if (!currentUser) {
+    elements.appView.hidden = true;
+    elements.authView.hidden = false;
   }
-} catch { clearSessionView(); }
+});
+initializeImportDialog();
+try { setTheme(localStorage.getItem(THEME_KEY) || "light"); } catch { setTheme("light"); }
+initializeFirebase();

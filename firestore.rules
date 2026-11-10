@@ -1,0 +1,31 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function hasValidShape(uid) {
+      let data = request.resource.data;
+      return data.keys().hasAll(['ownerUid', 'schemaVersion', 'boards', 'updatedAt'])
+        && data.keys().hasOnly(['ownerUid', 'schemaVersion', 'boards', 'updatedAt'])
+        && data.ownerUid is string
+        && data.ownerUid == uid
+        && data.schemaVersion is int
+        && data.schemaVersion == 1
+        && data.boards is list
+        && data.boards.size() <= 20
+        && data.updatedAt is timestamp;
+    }
+
+    match /boards/{uid} {
+      allow get, list: if isOwner(uid);
+      allow create, update: if isOwner(uid) && hasValidShape(uid);
+      allow delete: if isOwner(uid);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
