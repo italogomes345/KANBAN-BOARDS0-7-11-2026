@@ -37,7 +37,7 @@ A aplicação valida tipos, tamanho de títulos/descrições, quantidades e tama
 
 ## 4. Regras de segurança
 
-O texto completo está em `firestore.rules` e pode ser copiado para a aba **Regras** do Firestore. Usuários não autenticados são negados. Um usuário só pode acessar o documento cujo ID é seu próprio UID. Campos adicionais são rejeitados, assim como tipos incorretos no nível superior e mais de 20 boards.
+O texto completo está em `firestore.rules` e pode ser copiado para a aba **Regras** do Firestore. Como o arquivo está vinculado no `firebase.json`, também é possível publicá-lo pelo CLI com `firebase deploy --only firestore:rules --project boards-kanban`. Usuários não autenticados são negados. Um usuário só pode acessar o documento cujo ID é seu próprio UID. Campos adicionais são rejeitados, assim como tipos incorretos no nível superior e mais de 20 boards.
 
 O `firebaseConfig` de um app Web não é segredo: ele é entregue ao navegador. A proteção dos dados vem das regras do Firestore e da validação de identidade pelo Firebase Authentication, não de esconder a configuração. Não coloque senhas, tokens privados ou credenciais de usuário no config. Regras não podem ficar abertas ou em modo de teste.
 
