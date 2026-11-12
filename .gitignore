@@ -1,3 +1,4 @@
 # Configuração local do app Firebase. Não coloque senhas ou chaves privadas neste arquivo.
 firebase-config.js
 .firebase/
+firestore-debug.log

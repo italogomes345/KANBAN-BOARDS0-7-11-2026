@@ -1,11 +1,42 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isOwner(uid) {
-      return request.auth != null && request.auth.uid == uid;
+    function signedIn() {
+      return request.auth != null;
     }
 
-    function hasValidShape(uid) {
+    function isLegacyOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function boardPath(boardId) {
+      return /databases/$(database)/documents/boards/$(boardId);
+    }
+
+    function memberPath(boardId, uid) {
+      return /databases/$(database)/documents/boards/$(boardId)/members/$(uid);
+    }
+
+    function isBoardOwner(boardId) {
+      return signedIn() && exists(boardPath(boardId))
+        && get(boardPath(boardId)).data.ownerUid == request.auth.uid;
+    }
+
+    function hasBoardRole(boardId, role) {
+      let path = memberPath(boardId, request.auth.uid);
+      return signedIn() && exists(path) && get(path).data.role == role;
+    }
+
+    function isBoardMember(boardId) {
+      return exists(boardPath(boardId)) && (isBoardOwner(boardId) || hasBoardRole(boardId, 'OWNER')
+        || hasBoardRole(boardId, 'EDITOR') || hasBoardRole(boardId, 'VIEWER'));
+    }
+
+    function canEditBoard(boardId) {
+      return isBoardOwner(boardId) || hasBoardRole(boardId, 'OWNER') || hasBoardRole(boardId, 'EDITOR');
+    }
+
+    function hasValidLegacyShape(uid) {
       let data = request.resource.data;
       return data.keys().hasAll(['ownerUid', 'schemaVersion', 'boards', 'updatedAt'])
         && data.keys().hasOnly(['ownerUid', 'schemaVersion', 'boards', 'updatedAt'])
@@ -18,10 +49,148 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
-    match /boards/{uid} {
-      allow get, list: if isOwner(uid);
-      allow create, update: if isOwner(uid) && hasValidShape(uid);
-      allow delete: if isOwner(uid);
+    function hasValidBoard(data) {
+      return data.keys().hasAll(['id', 'ownerUid', 'schemaVersion', 'name', 'color', 'columns', 'sprints', 'definitionOfDone', 'updatedAt'])
+        && data.id is string && data.id.size() <= 80
+        && data.ownerUid is string
+        && data.schemaVersion == 2
+        && data.name is string && data.name.size() > 0 && data.name.size() <= 100
+        && data.color is string && data.color.matches('^#[0-9a-fA-F]{6}$')
+        && data.columns is list && data.columns.size() <= 20
+        && data.sprints is list && data.sprints.size() <= 30
+        && data.definitionOfDone is list && data.definitionOfDone.size() <= 30
+        && data.updatedAt is timestamp;
+    }
+
+    function invitedForBoard(boardId, inviteId) {
+      let invite = get(/databases/$(database)/documents/boardInvites/$(inviteId)).data;
+      return signedIn() && invite.boardId == boardId
+        && invite.email == request.auth.token.email
+        && invite.status == 'pending'
+        && invite.role in ['EDITOR', 'VIEWER'];
+    }
+
+    match /boards/{boardId} {
+      allow get: if isLegacyOwner(boardId)
+        || signedIn() && resource.data.ownerUid == request.auth.uid
+        || isBoardMember(boardId);
+      allow list: if signedIn() && resource.data.ownerUid == request.auth.uid;
+      allow create: if signedIn() && request.resource.data.ownerUid == request.auth.uid
+        && hasValidBoard(request.resource.data);
+      allow update: if isLegacyOwner(boardId)
+          && resource.data.schemaVersion == 1
+          && hasValidLegacyShape(boardId)
+        || canEditBoard(boardId)
+          && request.resource.data.ownerUid == resource.data.ownerUid
+          && request.resource.data.id == resource.data.id
+          && hasValidBoard(request.resource.data)
+          && (isBoardOwner(boardId)
+            || request.resource.data.diff(resource.data).affectedKeys().hasOnly(['columns', 'sprints', 'definitionOfDone', 'updatedAt']));
+      allow delete: if isBoardOwner(boardId);
+
+      match /members/{memberUid} {
+        allow get: if isBoardMember(boardId);
+        allow list: if signedIn() && (resource.data.userUid == request.auth.uid || isBoardOwner(boardId) || isBoardMember(boardId));
+        allow create: if isBoardOwner(boardId)
+            && request.resource.data.userUid == memberUid
+            && (memberUid == get(boardPath(boardId)).data.ownerUid && request.resource.data.role == 'OWNER'
+              || memberUid != get(boardPath(boardId)).data.ownerUid && request.resource.data.role in ['EDITOR', 'VIEWER'])
+          || signedIn() && memberUid == request.auth.uid
+            && request.resource.data.userUid == request.auth.uid
+            && request.resource.data.role in ['EDITOR', 'VIEWER']
+            && request.resource.data.inviteId is string
+            && invitedForBoard(boardId, request.resource.data.inviteId)
+            && request.resource.data.role == get(/databases/$(database)/documents/boardInvites/$(request.resource.data.inviteId)).data.role;
+        allow update: if isBoardOwner(boardId)
+          && memberUid != get(boardPath(boardId)).data.ownerUid
+          && request.resource.data.userUid == memberUid
+          && request.resource.data.role in ['EDITOR', 'VIEWER'];
+          allow delete: if isBoardOwner(boardId);
+      }
+
+      match /tasks/{taskId} {
+        allow read: if isBoardMember(boardId);
+        allow create: if canEditBoard(boardId)
+          && request.resource.data.boardId == boardId
+          && request.resource.data.id == taskId
+          && request.resource.data.title is string
+          && request.resource.data.title.size() > 0
+          && request.resource.data.title.size() <= 120
+          && request.resource.data.description is string
+          && request.resource.data.priority in ['baixa', 'media', 'alta']
+          && request.resource.data.labels is list
+          && request.resource.data.checklist is list
+          && request.resource.data.acceptanceCriteria is list
+          && request.resource.data.storyPoints is int
+          && request.resource.data.storyPoints >= 0
+          && request.resource.data.storyPoints <= 100;
+        allow update: if canEditBoard(boardId)
+          && request.resource.data.boardId == resource.data.boardId
+          && request.resource.data.id == resource.data.id
+          && request.resource.data.title is string
+          && request.resource.data.title.size() > 0
+          && request.resource.data.title.size() <= 120
+          && request.resource.data.priority in ['baixa', 'media', 'alta']
+          && request.resource.data.labels is list
+          && request.resource.data.storyPoints is int
+          && request.resource.data.storyPoints >= 0
+          && request.resource.data.storyPoints <= 100;
+        allow delete: if canEditBoard(boardId);
+
+        match /comments/{commentId} {
+          function parentBoardId() {
+            return get(/databases/$(database)/documents/boards/$(boardId)/tasks/$(taskId)).data.boardId;
+          }
+          allow read: if isBoardMember(parentBoardId());
+          allow create: if canEditBoard(parentBoardId())
+            && request.resource.data.authorUid == request.auth.uid
+            && request.resource.data.text is string
+            && request.resource.data.text.size() > 0
+            && request.resource.data.text.size() <= 2000
+            && request.resource.data.createdAt is timestamp;
+          allow update: if false;
+          allow delete: if canEditBoard(parentBoardId());
+        }
+      }
+
+      match /activity/{activityId} {
+        allow read: if isBoardMember(boardId);
+        allow create: if canEditBoard(boardId)
+          && request.resource.data.actorUid == request.auth.uid
+          && request.resource.data.action is string
+          && request.resource.data.createdAt is timestamp;
+        allow update, delete: if false;
+      }
+    }
+
+    match /boardInvites/{inviteId} {
+      allow get: if signedIn()
+        && (resource.data.email == request.auth.token.email || isBoardOwner(resource.data.boardId));
+      allow list: if signedIn()
+        && (resource.data.email == request.auth.token.email || isBoardOwner(resource.data.boardId));
+      allow create: if signedIn()
+        && isBoardOwner(request.resource.data.boardId)
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.email is string
+        && request.resource.data.role in ['EDITOR', 'VIEWER']
+        && request.resource.data.status == 'pending';
+      allow update: if signedIn()
+        && (isBoardOwner(resource.data.boardId)
+          || resource.data.email == request.auth.token.email
+            && resource.data.status == 'pending'
+            && request.resource.data.status == 'accepted'
+            && request.resource.data.acceptedUid == request.auth.uid)
+        && request.resource.data.boardId == resource.data.boardId
+        && request.resource.data.email == resource.data.email;
+      allow delete: if isBoardOwner(resource.data.boardId);
+    }
+
+    match /userMigrations/{uid} {
+      allow read, write: if isLegacyOwner(uid);
+    }
+
+    match /{path=**}/members/{memberUid} {
+      allow list: if signedIn() && resource.data.userUid == request.auth.uid;
     }
 
     match /{document=**} {

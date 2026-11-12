@@ -1,5 +1,6 @@
 import { firebaseConfig } from "./firebase-config.js";
 import { alertDialog, confirmDialog, promptDialog } from "./dialogs.js";
+import * as boardData from "./board-data.js";
 
 const FIREBASE_VERSION = "11.10.0";
 const BOARDS_COLLECTION = "boards";
@@ -16,12 +17,16 @@ const elements = Object.fromEntries([
   "homeLink", "authView", "authForm", "authTitle", "authIntro", "authError", "authSubmit", "authModeToggle", "authSwitchText",
   "usernameField", "usernameInput", "emailField", "emailInput", "loginIdentifier", "passwordInput", "togglePassword",
   "confirmField", "confirmPasswordInput", "toggleConfirmPassword", "userName", "logoutButton", "appView", "loadingView",
-  "loadingMessage", "dataErrorView", "dataErrorMessage", "retryDataButton", "homeView", "boardView", "boardGrid", "emptyBoards",
+  "loadingMessage", "dataErrorView", "dataErrorMessage", "retryDataButton", "homeView", "boardView", "boardGrid", "emptyBoards", "sharedBoardGrid", "emptySharedBoards",
   "boardTitle", "activeBoardColor", "columns", "taskSearch", "taskDialog", "taskForm", "taskTitleInput",
   "taskDescriptionInput", "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog", "importForm",
   "legacyProfileField", "legacyProfileSelect", "importLegacyButton", "discardLegacyButton", "toast", "themeToggle", "themeIcon",
-  "createBoardButton", "backButton", "renameBoardButton", "changeBoardColorButton", "deleteBoardButton", "addTaskButton",
-  "closeTaskDialog", "cancelTaskButton"
+  "createBoardButton", "backButton", "renameBoardButton", "changeBoardColorButton", "deleteBoardButton", "addTaskButton", "addSprintButton",
+  "closeTaskDialog", "cancelTaskButton", "shareBoardButton", "membersDialog", "membersForm", "closeMembersDialog", "memberList",
+  "inviteEmail", "inviteRole", "inviteMemberButton", "membersError", "taskPageView", "taskPageBackButton", "taskPageBoardName",
+  "taskPageTitle", "taskPageDescription", "taskAssigneeInput", "taskPageDueDate", "taskPagePriority", "taskPageLabels", "taskStoryPoints",
+  "taskSprint", "checklistProgress", "checklistItems", "checklistForm", "checklistInput", "acceptanceList", "acceptanceForm", "acceptanceInput",
+  "commentList", "commentForm", "commentInput", "commentSubmit"
 ].map((id) => [id, document.getElementById(id)]));
 
 let firebaseApi = null;
@@ -36,10 +41,13 @@ let authMode = "login";
 let toastTimer = null;
 let authGeneration = 0;
 let boardUnsubscribe = null;
+let activeBoardUnsubscribe = null;
+let commentsUnsubscribe = null;
 let saveQueue = Promise.resolve();
 let importChoices = [];
 let importDialogResolver = null;
 let dataReady = false;
+let activeTaskContext = null;
 
 function createId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -63,18 +71,38 @@ function showAuthError(message) {
 
 function mapFirebaseError(error, context = "auth") {
   const code = error && error.code ? error.code : "";
+  if (code === "app/no-accessible-boards") return "Nenhum quadro foi encontrado para esta conta. Seus dados existentes não foram removidos; confira o console para a etapa de carga.";
+  if (["auth/id-token-expired", "auth/user-token-expired", "auth/invalid-user-token", "unauthenticated"].includes(code)) {
+    return "Sua sessão expirou ou deixou de ser válida. Saia da conta e entre novamente.";
+  }
+  if (["permission-denied", "firestore/permission-denied"].includes(code)) {
+    return "Sem permissão para acessar estes quadros. Confirme se sua conta ainda é membro e tente novamente.";
+  }
+  if (["unavailable", "deadline-exceeded", "auth/network-request-failed"].includes(code) || !navigator.onLine) {
+    return "Falha de rede ao acessar os quadros. Verifique a conexão e tente novamente.";
+  }
+  if (code === "failed-precondition") return "O Firestore precisa de um índice para esta consulta. Consulte o erro detalhado no console.";
+  if (code === "invite/already-member") return "Este e-mail já é membro ou tem um convite pendente.";
   if (code === "auth/invalid-credential" || code === "auth/wrong-password" || code === "auth/user-not-found" || code === "auth/invalid-login-credentials") {
     return "E-mail ou senha incorretos.";
   }
   if (code === "auth/too-many-requests") return "Muitas tentativas. Aguarde um pouco e tente novamente.";
-  if (code === "auth/network-request-failed" || !navigator.onLine) return "Falha de conexão. Verifique a internet e tente novamente.";
+  if (code === "auth/network-request-failed") return "Falha de conexão. Verifique a internet e tente novamente.";
   if (code === "auth/email-already-in-use") return "Não foi possível criar a conta com esses dados.";
   if (code === "auth/invalid-email") return "Informe um e-mail válido.";
   if (code === "auth/weak-password") return "A senha precisa ter pelo menos 8 caracteres.";
   if (code === "auth/operation-not-allowed") return "O login por e-mail e senha ainda não foi habilitado no Firebase.";
-  if (code === "permission-denied" || code === "firestore/permission-denied") return "O Firebase recusou o acesso. Confira as regras do Firestore.";
   if (context === "data") return "Não foi possível carregar ou salvar seus quadros. Tente novamente.";
   return "Não foi possível concluir a operação. Confira a configuração do Firebase e tente novamente.";
+}
+
+function logFirebaseError(error, operation) {
+  console.error(`[Firestore] ${operation} falhou`, {
+    stage: error && error.boardDataStage ? error.boardDataStage : "unknown",
+    code: error && error.code ? error.code : "unknown",
+    message: error && error.message ? error.message : String(error),
+    stack: error && error.stack ? error.stack : "stack unavailable"
+  }, error);
 }
 
 function setAuthMode(mode) {
@@ -160,6 +188,7 @@ function showSignedOut() {
   stopBoardListener();
   state = { boards: [] };
   activeBoardId = null;
+  activeTaskContext = null;
   elements.appView.hidden = true;
   elements.userName.hidden = true;
   elements.logoutButton.hidden = true;
@@ -189,6 +218,7 @@ async function handleAuthStateChanged(user) {
   try {
     await loadOrCreateUserBoards(user, generation);
   } catch (error) {
+    logFirebaseError(error, "initial board load");
     if (generation === authGeneration) showDataError(mapFirebaseError(error, "data"));
   }
 }
@@ -199,6 +229,7 @@ function showLoading(message) {
   elements.dataErrorView.hidden = true;
   elements.homeView.hidden = true;
   elements.boardView.hidden = true;
+  elements.taskPageView.hidden = true;
 }
 
 function showDataError(message) {
@@ -208,6 +239,7 @@ function showDataError(message) {
   elements.dataErrorMessage.textContent = message;
   elements.homeView.hidden = true;
   elements.boardView.hidden = true;
+  elements.taskPageView.hidden = true;
 }
 
 function showApp() {
@@ -216,6 +248,7 @@ function showApp() {
   elements.dataErrorView.hidden = true;
   elements.homeView.hidden = false;
   elements.boardView.hidden = true;
+  elements.taskPageView.hidden = true;
   renderBoards();
 }
 
@@ -248,7 +281,11 @@ async function logoutUser() {
 
 function stopBoardListener() {
   if (boardUnsubscribe) boardUnsubscribe();
+  if (activeBoardUnsubscribe) activeBoardUnsubscribe();
+  if (commentsUnsubscribe) commentsUnsubscribe();
   boardUnsubscribe = null;
+  activeBoardUnsubscribe = null;
+  commentsUnsubscribe = null;
 }
 
 // Valida toda a estrutura antes de usar dados vindos do banco ou do navegador.
@@ -390,61 +427,39 @@ function validateDocumentData(data, uid) {
 }
 
 async function loadOrCreateUserBoards(user, generation) {
-  const reference = firebaseApi.doc(db, BOARDS_COLLECTION, user.uid);
-  const snapshot = await firebaseApi.getDoc(reference);
+  state = { boards: await boardData.loadBoards(firebaseApi, db, user, {
+    selectLocalBoards: async () => {
+      const options = readLegacyOptions();
+      return options.hadLocalData ? chooseLegacyData(options) : { boards: [], clearLegacy: false };
+    },
+    onLegacyImported: clearLegacyData
+  }) };
   if (generation !== authGeneration || !currentUser || currentUser.uid !== user.uid) return;
-
-  if (snapshot.exists()) {
-    const boards = validateDocumentData(snapshot.data(), user.uid);
-    if (!boards) throw new Error("Os dados deste documento não correspondem ao formato suportado.");
-    state = { boards };
-    subscribeToUserBoards(reference, user.uid, generation);
-    showApp();
-    return;
-  }
-
-  const choice = await chooseLegacyData(readLegacyOptions());
-  if (generation !== authGeneration || !currentUser || currentUser.uid !== user.uid) return;
-  const selectedBoards = choice.boards.length > 0 ? choice.boards : createDefaultBoards();
-  const validatedBoards = validateBoards(selectedBoards);
-  if (!validatedBoards) throw new Error("Os dados selecionados para importar ultrapassam os limites permitidos.");
-  const documentData = makeDocumentData(user.uid, validatedBoards);
-  const created = await firebaseApi.runTransaction(db, async (transaction) => {
-    const latest = await transaction.get(reference);
-    if (latest.exists()) return false;
-    transaction.set(reference, documentData);
-    return true;
-  });
-  if (generation !== authGeneration || !currentUser || currentUser.uid !== user.uid) return;
-  if (created && choice.clearLegacy) clearLegacyData();
-  const savedSnapshot = await firebaseApi.getDoc(reference);
-  const boards = savedSnapshot.exists() ? validateDocumentData(savedSnapshot.data(), user.uid) : null;
-  if (!boards) throw new Error("Não foi possível confirmar os dados iniciais do Firestore.");
-  state = { boards };
-  subscribeToUserBoards(reference, user.uid, generation);
+  if (!state.boards.length) throw new Error("Sua conta ainda não tem quadros acessíveis.");
   showApp();
+  const taskMatch = window.location.pathname.match(/^\/tasks\/([^/]+)\/?$/);
+  if (taskMatch) await openTaskPage(decodeURIComponent(taskMatch[1]));
 }
 
-function subscribeToUserBoards(reference, uid, generation) {
-  stopBoardListener();
-  boardUnsubscribe = firebaseApi.onSnapshot(reference, (snapshot) => {
-    if (generation !== authGeneration || !currentUser || currentUser.uid !== uid) return;
-    if (!snapshot.exists()) {
-      showDataError("O documento dos seus quadros não existe mais. Tente novamente.");
-      return;
+function handleActiveBoardError(boardId, error) {
+  if (error && (error.code === "permission-denied" || error.code === "firestore/permission-denied")) {
+    state.boards = state.boards.filter((board) => board.id !== boardId);
+    if (activeBoardId === boardId) {
+      if (activeBoardUnsubscribe) activeBoardUnsubscribe();
+      if (commentsUnsubscribe) commentsUnsubscribe();
+      activeBoardUnsubscribe = null;
+      commentsUnsubscribe = null;
+      activeBoardId = null;
+      activeTaskContext = null;
+      elements.boardView.hidden = true;
+      elements.taskPageView.hidden = true;
+      elements.homeView.hidden = false;
+      renderBoards();
     }
-    const boards = validateDocumentData(snapshot.data(), uid);
-    if (!boards) {
-      showDataError("Os dados recebidos do Firestore estão inválidos e não foram exibidos.");
-      return;
-    }
-    state = { boards };
-    if (!dataReady) showApp();
-    else if (activeBoardId) renderColumns();
-    else renderBoards();
-  }, (error) => {
-    if (generation === authGeneration) showDataError(mapFirebaseError(error, "data"));
-  });
+    showToast("Seu acesso a este quadro foi removido ou alterado.");
+    return;
+  }
+  showToast(mapFirebaseError(error, "data"));
 }
 
 async function retryLoadingData() {
@@ -454,64 +469,84 @@ async function retryLoadingData() {
   try {
     await loadOrCreateUserBoards(currentUser, generation);
   } catch (error) {
+    logFirebaseError(error, "retry board load");
     if (generation === authGeneration) showDataError(mapFirebaseError(error, "data"));
   }
 }
 
-async function persistState() {
+async function persistState(boardId = activeBoardId) {
   if (!currentUser || !dataReady || !db || !firebaseApi) return;
+  const board = state.boards.find((item) => item.id === boardId);
+  if (!board || !canEditBoard(board)) return;
   if (!navigator.onLine) {
     showToast("Sem conexão. A alteração ainda não foi sincronizada com o Firebase.");
     return;
   }
-  const boards = validateBoards(state.boards);
-  if (!boards) {
-    showToast("Os dados excedem os limites aceitos e não foram salvos.");
-    return;
-  }
+  const boards = validateBoards([board]);
+  if (!boards) { showToast("Os dados excedem os limites aceitos e não foram salvos."); return; }
   const uid = currentUser.uid;
-  const capturedBoards = JSON.parse(JSON.stringify(boards));
+  const capturedBoard = JSON.parse(JSON.stringify(boards[0]));
   elements.loadingMessage.textContent = "Salvando alterações...";
   elements.loadingView.hidden = false;
   saveQueue = saveQueue.catch(() => {}).then(async () => {
     if (!currentUser || currentUser.uid !== uid) return;
-    await firebaseApi.setDoc(firebaseApi.doc(db, BOARDS_COLLECTION, uid), makeDocumentData(uid, capturedBoards));
+    await boardData.saveBoard(capturedBoard, firebaseApi, db);
   });
   try {
     await saveQueue;
     elements.loadingView.hidden = true;
   } catch (error) {
     elements.loadingView.hidden = true;
+    logFirebaseError(error, "save board");
     showToast(mapFirebaseError(error, "data"));
   }
 }
 
 function createBoard(name, color = BOARD_COLORS[0]) {
-  state.boards.push({
-    id: createId(), name, color,
+  const board = {
+    id: createId(), name, color, ownerUid: currentUser.uid, role: "OWNER", sprints: [], definitionOfDone: [],
     columns: [
-      { id: createId(), name: "A Fazer", tasks: [] },
-      { id: createId(), name: "Em Andamento", tasks: [] },
-      { id: createId(), name: "Concluído", tasks: [] }
+      { id: createId(), name: "Backlog", kind: "backlog", wipLimit: null, tasks: [] },
+      { id: createId(), name: "A Fazer", kind: "work", wipLimit: null, tasks: [] },
+      { id: createId(), name: "Em Andamento", kind: "work", wipLimit: null, tasks: [] },
+      { id: createId(), name: "Concluído", kind: "work", wipLimit: null, tasks: [] }
     ]
-  });
+  };
+  state.boards.push(board);
   renderBoards();
-  void persistState();
+  boardData.createBoard(board, firebaseApi, db, currentUser).catch((error) => {
+    state.boards = state.boards.filter((item) => item.id !== board.id);
+    renderBoards();
+    showToast(mapFirebaseError(error, "data"));
+  });
 }
 
 function createTask(column, title, details = {}) {
+  if (!canEditBoard() || column.wipLimit && column.tasks.length >= column.wipLimit) {
+    showToast(column.wipLimit ? `Limite WIP atingido em "${column.name}".` : "Você não tem permissão para editar este quadro.");
+    return false;
+  }
   column.tasks.push({
     id: createId(), title, description: details.description || "",
-    priority: details.priority || "media", dueDate: details.dueDate || ""
+    priority: details.priority || "media", dueDate: details.dueDate || "", labels: details.labels || [],
+    assigneeUid: details.assigneeUid || "", assigneeName: details.assigneeName || "", checklist: details.checklist || [],
+    acceptanceCriteria: details.acceptanceCriteria || [], storyPoints: details.storyPoints || 0, sprintId: details.sprintId || ""
   });
   renderColumns();
-  void persistState();
+  void persistState(activeBoardId);
+  return true;
 }
 
 function renderBoards() {
-  elements.boardGrid.replaceChildren();
-  elements.emptyBoards.hidden = state.boards.length > 0;
-  state.boards.forEach((board) => {
+  renderBoardCards(state.boards.filter((board) => board.ownerUid === currentUser.uid || board.role === "OWNER"), elements.boardGrid, elements.emptyBoards);
+  renderBoardCards(state.boards.filter((board) => board.ownerUid !== currentUser.uid && board.role !== "OWNER"), elements.sharedBoardGrid, elements.emptySharedBoards);
+  elements.createBoardButton.disabled = !currentUser;
+}
+
+function renderBoardCards(boards, container, emptyState) {
+  container.replaceChildren();
+  emptyState.hidden = boards.length > 0;
+  boards.forEach((board) => {
     const card = document.createElement("article");
     card.className = "board-card";
     card.style.setProperty("--board-color", board.color);
@@ -532,20 +567,37 @@ function renderBoards() {
     summary.textContent = `${board.columns.length} ${board.columns.length === 1 ? "coluna" : "colunas"} · ${taskCount} ${taskCount === 1 ? "tarefa" : "tarefas"}`;
     const actions = document.createElement("div");
     actions.className = "board-card-actions";
-    actions.append(
-      createIconButton("✎", "Renomear quadro", () => renameBoard(board)),
-      createIconButton("●", "Trocar cor do quadro", () => changeBoardColor(board)),
-      createIconButton("⌫", "Excluir quadro", () => deleteBoard(board), "danger-icon")
-    );
+    if (isBoardOwner(board)) {
+      actions.append(
+        createIconButton("✎", "Renomear quadro", () => renameBoard(board)),
+        createIconButton("●", "Trocar cor do quadro", () => changeBoardColor(board)),
+        createIconButton("⌫", "Excluir quadro", () => deleteBoard(board), "danger-icon")
+      );
+    } else {
+      const role = document.createElement("span");
+      role.className = "board-role-label";
+      role.textContent = board.role === "VIEWER" ? "Leitor" : "Editor";
+      actions.append(role);
+    }
     meta.append(summary, actions);
     card.append(title, meta);
-    elements.boardGrid.append(card);
+    container.append(card);
   });
 }
 
 function renderColumns() {
   const board = getActiveBoard();
   if (!board) return;
+  document.querySelectorAll(".sprint-summary").forEach((item) => item.remove());
+  board.sprints.forEach((sprint) => {
+    const points = board.columns.flatMap((column) => column.tasks).filter((task) => task.sprintId === sprint.id)
+      .reduce((total, task) => total + (task.storyPoints || 0), 0);
+    const summary = document.createElement("span");
+    summary.className = "sprint-summary";
+    summary.textContent = `${sprint.name}: ${points} pts`;
+    summary.title = `${points} story points na sprint ${sprint.name}`;
+    elements.addSprintButton.parentElement.insertBefore(summary, elements.addSprintButton);
+  });
   elements.columns.replaceChildren();
   board.columns.forEach((column) => elements.columns.append(createColumnElement(column)));
   const addColumnButton = document.createElement("button");
@@ -553,7 +605,14 @@ function renderColumns() {
   addColumnButton.className = "add-column-button";
   addColumnButton.textContent = "＋ Adicionar coluna";
   addColumnButton.addEventListener("click", addColumn);
+  addColumnButton.hidden = !canEditBoard(board);
   elements.columns.append(addColumnButton);
+  elements.renameBoardButton.hidden = !isBoardOwner(board);
+  elements.changeBoardColorButton.hidden = !isBoardOwner(board);
+  elements.deleteBoardButton.hidden = !isBoardOwner(board);
+  elements.shareBoardButton.hidden = false;
+  elements.addSprintButton.hidden = !canEditBoard(board);
+  elements.addTaskButton.hidden = !canEditBoard(board);
   applySearch();
 }
 
@@ -561,9 +620,11 @@ function createColumnElement(column) {
   const section = document.createElement("section");
   section.className = "column";
   section.dataset.columnId = column.id;
-  section.addEventListener("dragover", handleDragOver);
-  section.addEventListener("dragleave", handleDragLeave);
-  section.addEventListener("drop", handleDrop);
+  if (canEditBoard()) {
+    section.addEventListener("dragover", handleDragOver);
+    section.addEventListener("dragleave", handleDragLeave);
+    section.addEventListener("drop", handleDrop);
+  }
   const header = document.createElement("header");
   header.className = "column-header";
   const titleWrap = document.createElement("div");
@@ -576,14 +637,34 @@ function createColumnElement(column) {
   count.className = "task-count";
   count.textContent = String(column.tasks.length);
   count.setAttribute("aria-label", `${column.tasks.length} tarefas`);
-  titleWrap.append(title, count);
+  const points = column.tasks.reduce((total, task) => total + (task.storyPoints || 0), 0);
+  const pointsBadge = document.createElement("span");
+  pointsBadge.className = "task-count story-point-total";
+  pointsBadge.textContent = `${points} pts`;
+  pointsBadge.setAttribute("aria-label", `${points} story points`);
+  titleWrap.append(title, count, pointsBadge);
   const actions = document.createElement("div");
   actions.className = "column-actions";
-  actions.append(
-    createIconButton("✎", "Renomear coluna", () => renameColumn(column)),
-    createIconButton("⌫", "Excluir coluna", () => deleteColumn(column), "danger-icon")
-  );
+  if (canEditBoard()) {
+    const board = getActiveBoard();
+    const index = board.columns.findIndex((item) => item.id === column.id);
+    actions.append(
+      createIconButton("↑", "Mover coluna para a esquerda", () => moveColumn(column, -1), "column-move"),
+      createIconButton("↓", "Mover coluna para a direita", () => moveColumn(column, 1), "column-move"),
+      createIconButton("↕", `Definir limite WIP${column.wipLimit ? ` (${column.wipLimit})` : ""}`, () => setColumnWipLimit(column)),
+      createIconButton("✎", "Renomear coluna", () => renameColumn(column)),
+      createIconButton("⌫", "Excluir coluna", () => deleteColumn(column), "danger-icon")
+    );
+    actions.querySelectorAll("button")[0].disabled = index <= 0;
+    actions.querySelectorAll("button")[1].disabled = index >= board.columns.length - 1;
+  }
   header.append(titleWrap, actions);
+  if (column.wipLimit) {
+    const wip = document.createElement("p");
+    wip.className = "column-wip";
+    wip.textContent = `WIP ${column.tasks.length}/${column.wipLimit}`;
+    header.append(wip);
+  }
   const list = document.createElement("div");
   list.className = "task-list";
   list.dataset.columnId = column.id;
@@ -597,6 +678,7 @@ function createColumnElement(column) {
   column.tasks.forEach((task) => list.append(createTaskElement(task, column.id)));
   const form = document.createElement("form");
   form.className = "add-task-form";
+  form.hidden = !canEditBoard();
   const input = document.createElement("input");
   input.type = "text";
   input.maxLength = 120;
@@ -611,8 +693,7 @@ function createColumnElement(column) {
     event.preventDefault();
     const taskTitle = input.value.trim();
     if (!taskTitle) { input.focus(); return; }
-    createTask(column, taskTitle);
-    showToast("Tarefa adicionada.");
+    if (createTask(column, taskTitle)) showToast("Tarefa adicionada.");
   });
   section.append(header, list, form);
   return section;
@@ -621,11 +702,13 @@ function createColumnElement(column) {
 function createTaskElement(task, columnId) {
   const card = document.createElement("article");
   card.className = "task-card";
-  card.draggable = true;
+  card.draggable = canEditBoard();
   card.dataset.taskId = task.id;
   card.dataset.columnId = columnId;
-  card.addEventListener("dragstart", handleDragStart);
-  card.addEventListener("dragend", handleDragEnd);
+  if (canEditBoard()) {
+    card.addEventListener("dragstart", handleDragStart);
+    card.addEventListener("dragend", handleDragEnd);
+  }
   const title = document.createElement("h3");
   title.className = "task-card-title";
   title.textContent = task.title;
@@ -650,9 +733,30 @@ function createTaskElement(task, columnId) {
     dueDate.textContent = formatDate(task.dueDate);
     badges.append(dueDate);
   }
+  (task.labels || []).forEach((label) => {
+    const labelBadge = document.createElement("span");
+    labelBadge.className = `badge task-label label-${label.toLocaleLowerCase("en-US")}`;
+    labelBadge.textContent = label;
+    badges.append(labelBadge);
+  });
+  if (task.storyPoints) {
+    const points = document.createElement("span");
+    points.className = "badge story-points";
+    points.textContent = `${task.storyPoints} pts`;
+    badges.append(points);
+  }
   const actions = document.createElement("div");
   actions.className = "task-actions";
-  actions.append(createIconButton("✎", "Editar tarefa", () => openTaskModal(columnId, task)));
+  const taskLink = document.createElement("a");
+  taskLink.className = "task-open-link";
+  taskLink.href = `/tasks/${encodeURIComponent(task.id)}`;
+  taskLink.target = "_blank";
+  taskLink.rel = "noopener";
+  taskLink.setAttribute("aria-label", `Abrir tarefa ${task.title} em nova aba`);
+  taskLink.title = "Abrir tarefa em nova aba";
+  taskLink.textContent = "↗";
+  actions.append(taskLink);
+  if (canEditBoard()) actions.append(createIconButton("✎", "Editar tarefa", () => openTaskModal(columnId, task)));
   const deleteButton = document.createElement("button");
   deleteButton.type = "button";
   deleteButton.className = "delete-task";
@@ -666,7 +770,14 @@ function createTaskElement(task, columnId) {
   trashIcon.append(trashPath);
   deleteButton.append(trashIcon);
   deleteButton.addEventListener("click", () => deleteTask(columnId, task.id));
-  actions.append(deleteButton);
+  if (canEditBoard()) actions.append(deleteButton);
+  if (task.assigneeName) {
+    const assignee = document.createElement("span");
+    assignee.className = "task-assignee-avatar";
+    assignee.title = `Responsável: ${task.assigneeName}`;
+    assignee.textContent = Array.from(task.assigneeName.trim())[0]?.toLocaleUpperCase("pt-BR") || "?";
+    actions.prepend(assignee);
+  }
   footer.append(badges, actions);
   card.append(footer);
   return card;
@@ -685,23 +796,53 @@ function createIconButton(symbol, label, action, extraClass = "") {
 
 function getActiveBoard() { return state.boards.find((board) => board.id === activeBoardId) || null; }
 
+function canEditBoard(board = getActiveBoard()) {
+  return Boolean(board && ["OWNER", "EDITOR"].includes(board.role));
+}
+
+function isBoardOwner(board) {
+  return Boolean(board && currentUser && board.ownerUid === currentUser.uid);
+}
+
 function openBoard(boardId) {
   if (!dataReady || !currentUser) return;
+  if (activeBoardUnsubscribe) activeBoardUnsubscribe();
+  if (commentsUnsubscribe) commentsUnsubscribe();
+  activeBoardUnsubscribe = null;
+  commentsUnsubscribe = null;
+  activeTaskContext = null;
   activeBoardId = boardId;
   const board = getActiveBoard();
   if (!board) return;
+  history.pushState({}, "", "/");
   elements.homeView.hidden = true;
   elements.boardView.hidden = false;
+  elements.taskPageView.hidden = true;
   elements.boardTitle.textContent = board.name;
   elements.activeBoardColor.style.backgroundColor = board.color;
   elements.taskSearch.value = "";
   renderColumns();
+  activeBoardUnsubscribe = boardData.subscribeBoard(firebaseApi, db, board.id, board.role, currentUser.uid, (updatedBoard) => {
+    const index = state.boards.findIndex((item) => item.id === updatedBoard.id);
+    if (index >= 0) state.boards[index] = updatedBoard;
+    if (activeBoardId === updatedBoard.id) {
+      if (activeTaskContext) renderTaskPage();
+      else renderColumns();
+    }
+  }, (error) => handleActiveBoardError(board.id, error));
 }
 
 function returnHome() {
   if (!currentUser || !dataReady) return;
+  if (activeBoardUnsubscribe) activeBoardUnsubscribe();
+  if (commentsUnsubscribe) commentsUnsubscribe();
+  activeBoardUnsubscribe = null;
+  commentsUnsubscribe = null;
+  activeTaskContext = null;
   activeBoardId = null;
+  history.pushState({}, "", "/");
   elements.boardView.hidden = true;
+  elements.taskPageView.hidden = true;
   elements.homeView.hidden = false;
   renderBoards();
 }
@@ -713,6 +854,7 @@ function goHome() {
 }
 
 async function renameBoard(board) {
+  if (!isBoardOwner(board)) return;
   const name = await promptDialog({
     title: "Renomear quadro",
     message: "Atualize o nome que aparece no seu quadro e no painel da organização.",
@@ -732,10 +874,11 @@ async function renameBoard(board) {
   board.name = trimmed;
   renderBoards();
   if (board.id === activeBoardId) elements.boardTitle.textContent = board.name;
-  void persistState();
+  void persistState(board.id);
 }
 
 async function changeBoardColor(board) {
+  if (!isBoardOwner(board)) return;
   const color = await promptDialog({
     title: "Definir cor do quadro",
     message: `Escolha uma cor em hexadecimal para identificar este quadro. Exemplo: ${BOARD_COLORS[0]}.`,
@@ -752,10 +895,11 @@ async function changeBoardColor(board) {
   board.color = trimmedColor;
   renderBoards();
   if (board.id === activeBoardId) elements.activeBoardColor.style.backgroundColor = board.color;
-  void persistState();
+  void persistState(board.id);
 }
 
 async function deleteBoard(board) {
+  if (!isBoardOwner(board)) return;
   const confirmed = await confirmDialog({
     title: "Excluir quadro",
     message: `Excluir o quadro "${board.name}" e todas as suas tarefas? Esta ação não pode ser desfeita.`,
@@ -766,11 +910,17 @@ async function deleteBoard(board) {
   if (!confirmed) return;
   state.boards = state.boards.filter((item) => item.id !== board.id);
   if (activeBoardId === board.id) returnHome(); else renderBoards();
-  void persistState();
-  showToast("Quadro excluído.");
+  try {
+    await boardData.deleteBoard(board.id, firebaseApi, db);
+    showToast("Quadro excluído.");
+  } catch (error) {
+    showToast(mapFirebaseError(error, "data"));
+    void retryLoadingData();
+  }
 }
 
 async function addColumn() {
+  if (!canEditBoard()) return;
   const name = await promptDialog({
     title: "Nova coluna",
     message: "Crie uma coluna para separar etapas do trabalho, como 'A fazer' ou 'Concluído'.",
@@ -786,12 +936,13 @@ async function addColumn() {
     showToast("Informe um nome de coluna com até 60 caracteres.");
     return;
   }
-  getActiveBoard().columns.push({ id: createId(), name: trimmed, tasks: [] });
+  getActiveBoard().columns.push({ id: createId(), name: trimmed, kind: "work", wipLimit: null, tasks: [] });
   renderColumns();
-  void persistState();
+  void persistState(activeBoardId);
 }
 
 async function renameColumn(column) {
+  if (!canEditBoard()) return;
   const name = await promptDialog({
     title: "Renomear coluna",
     message: "Atualize o título da coluna para refletir melhor a etapa atual do trabalho.",
@@ -810,10 +961,11 @@ async function renameColumn(column) {
   }
   column.name = trimmed;
   renderColumns();
-  void persistState();
+  void persistState(activeBoardId);
 }
 
 async function deleteColumn(column) {
+  if (!canEditBoard()) return;
   const confirmed = await confirmDialog({
     title: "Excluir coluna",
     message: `Excluir a coluna "${column.name}" e todas as tarefas dela?`,
@@ -825,13 +977,42 @@ async function deleteColumn(column) {
   const board = getActiveBoard();
   board.columns = board.columns.filter((item) => item.id !== column.id);
   renderColumns();
-  void persistState();
+  void persistState(board.id);
   showToast("Coluna excluída.");
+}
+
+async function setColumnWipLimit(column) {
+  if (!canEditBoard()) return;
+  const value = await promptDialog({
+    title: "Limite de trabalho em andamento",
+    message: "Informe o máximo de tarefas nesta coluna. Use 0 para remover o limite.",
+    label: "Quantidade máxima",
+    defaultValue: String(column.wipLimit || 0),
+    confirmText: "Salvar"
+  });
+  if (value === null) return;
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 0 || limit > 100) { showToast("Informe um número inteiro entre 0 e 100."); return; }
+  if (limit > 0 && limit < column.tasks.length) { showToast("O limite não pode ser menor que as tarefas atuais."); return; }
+  column.wipLimit = limit || null;
+  renderColumns();
+  void persistState(activeBoardId);
+}
+
+function moveColumn(column, direction) {
+  if (!canEditBoard()) return;
+  const board = getActiveBoard();
+  const index = board.columns.findIndex((item) => item.id === column.id);
+  const targetIndex = index + direction;
+  if (targetIndex < 0 || targetIndex >= board.columns.length) return;
+  [board.columns[index], board.columns[targetIndex]] = [board.columns[targetIndex], board.columns[index]];
+  renderColumns();
+  void persistState(board.id);
 }
 
 // MODAL
 function openTaskModal(columnId, task = null) {
-  if (!currentUser || !dataReady) return;
+  if (!currentUser || !dataReady || !canEditBoard()) return;
   editingTask = task ? { columnId, taskId: task.id } : { columnId, taskId: null };
   elements.taskDialogTitle.textContent = task ? "Editar tarefa" : "Adicionar tarefa";
   elements.taskTitleInput.value = task ? task.title : "";
@@ -845,7 +1026,7 @@ function openTaskModal(columnId, task = null) {
 
 function saveTaskFromDialog(event) {
   event.preventDefault();
-  if (!currentUser || !dataReady || !editingTask) return;
+  if (!currentUser || !dataReady || !editingTask || !canEditBoard()) return;
   const title = elements.taskTitleInput.value.trim();
   const description = elements.taskDescriptionInput.value.trim();
   if (!title || title.length > 120) {
@@ -866,17 +1047,24 @@ function saveTaskFromDialog(event) {
     const task = column.tasks.find((item) => item.id === editingTask.taskId);
     if (task) Object.assign(task, { title, ...details });
   } else {
-    column.tasks.push({ id: createId(), title, ...details });
+    if (column.wipLimit && column.tasks.length >= column.wipLimit) {
+      elements.taskError.textContent = `Limite WIP atingido em "${column.name}".`;
+      return;
+    }
+    column.tasks.push({
+      id: createId(), title, ...details, labels: [], assigneeUid: "", assigneeName: "", checklist: [],
+      acceptanceCriteria: [], storyPoints: 0, sprintId: ""
+    });
   }
   editingTask = null;
   elements.taskDialog.close();
   renderColumns();
-  void persistState();
+  void persistState(activeBoardId);
   showToast("Tarefa salva.");
 }
 
 async function deleteTask(columnId, taskId) {
-  if (!currentUser || !dataReady) return;
+  if (!currentUser || !dataReady || !canEditBoard()) return;
   const board = getActiveBoard();
   const column = board && board.columns.find((item) => item.id === columnId);
   const task = column && column.tasks.find((item) => item.id === taskId);
@@ -891,12 +1079,326 @@ async function deleteTask(columnId, taskId) {
   if (!confirmed) return;
   column.tasks = column.tasks.filter((item) => item.id !== taskId);
   renderColumns();
-  void persistState();
+  void persistState(activeBoardId);
   showToast("Tarefa excluída.");
+}
+
+function findTaskContext(taskId) {
+  for (const board of state.boards) {
+    for (const column of board.columns) {
+      const task = column.tasks.find((item) => item.id === taskId);
+      if (task) return { board, column, task };
+    }
+  }
+  return null;
+}
+
+async function openTaskPage(taskId) {
+  const context = findTaskContext(taskId);
+  if (!context) {
+    showDataError("Acesso negado. A tarefa não existe ou sua conta não é membro do quadro.");
+    return;
+  }
+  if (activeBoardUnsubscribe) activeBoardUnsubscribe();
+  if (commentsUnsubscribe) commentsUnsubscribe();
+  activeBoardId = context.board.id;
+  activeTaskContext = { boardId: context.board.id, taskId };
+  elements.loadingView.hidden = true;
+  elements.dataErrorView.hidden = true;
+  elements.homeView.hidden = true;
+  elements.boardView.hidden = true;
+  elements.taskPageView.hidden = false;
+  await loadTaskMembers(context.board);
+  renderTaskPage();
+  activeBoardUnsubscribe = boardData.subscribeBoard(firebaseApi, db, context.board.id, context.board.role, currentUser.uid, (updatedBoard) => {
+    const index = state.boards.findIndex((item) => item.id === updatedBoard.id);
+    if (index >= 0) state.boards[index] = updatedBoard;
+    if (activeTaskContext && activeTaskContext.taskId === taskId) renderTaskPage();
+  }, (error) => handleActiveBoardError(context.board.id, error));
+  commentsUnsubscribe = boardData.subscribeComments(firebaseApi, db, context.board.id, taskId, renderComments, (error) => showToast(mapFirebaseError(error, "data")));
+}
+
+async function loadTaskMembers(board) {
+  const result = await boardData.listMembers(board.id, firebaseApi, db, false);
+  const select = elements.taskAssigneeInput;
+  select.replaceChildren(new Option("Sem responsável", ""));
+  result.members.forEach((member) => {
+    const option = new Option(member.displayName || member.email || "Membro", member.userUid);
+    select.append(option);
+  });
+}
+
+function renderTaskPage() {
+  if (!activeTaskContext) return;
+  const context = findTaskContext(activeTaskContext.taskId);
+  if (!context) {
+    showDataError("A tarefa foi removida ou seu acesso ao quadro foi revogado.");
+    return;
+  }
+  const { board, task } = context;
+  const editable = canEditBoard(board);
+  elements.taskPageTitle.textContent = task.title;
+  elements.taskPageDescription.textContent = task.description || "Sem descrição.";
+  elements.taskPageBoardName.textContent = board.name;
+  elements.taskAssigneeInput.value = task.assigneeUid || "";
+  elements.taskPageDueDate.value = task.dueDate || "";
+  elements.taskPagePriority.value = task.priority || "media";
+  elements.taskStoryPoints.value = String(task.storyPoints || 0);
+  elements.taskSprint.replaceChildren(new Option("Sem sprint", ""));
+  board.sprints.forEach((sprint) => elements.taskSprint.append(new Option(sprint.name, sprint.id)));
+  elements.taskSprint.value = task.sprintId || "";
+  Array.from(elements.taskPageLabels.options).forEach((option) => { option.selected = (task.labels || []).includes(option.value); });
+  [elements.taskAssigneeInput, elements.taskPageDueDate, elements.taskPagePriority, elements.taskPageLabels, elements.taskStoryPoints, elements.taskSprint].forEach((control) => { control.disabled = !editable; });
+  elements.checklistInput.disabled = !editable;
+  elements.acceptanceInput.disabled = !editable;
+  elements.commentInput.disabled = !editable;
+  elements.commentSubmit.disabled = !editable;
+  renderTaskChecklist(task.checklist || [], elements.checklistItems, "checklist", editable);
+  renderTaskChecklist(task.acceptanceCriteria || [], elements.acceptanceList, "acceptanceCriteria", editable);
+  const complete = (task.checklist || []).filter((item) => item && item.done).length;
+  elements.checklistProgress.textContent = `${complete}/${(task.checklist || []).length}`;
+}
+
+function renderTaskChecklist(items, container, property, editable) {
+  container.replaceChildren();
+  items.forEach((item, index) => {
+    const row = document.createElement("label");
+    row.className = "checklist-row";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.checked = Boolean(item && item.done);
+    checkbox.disabled = !editable;
+    checkbox.addEventListener("change", () => {
+      const context = activeTaskContext && findTaskContext(activeTaskContext.taskId);
+      if (!context || !canEditBoard(context.board)) return;
+      context.task[property][index].done = checkbox.checked;
+      renderTaskPage();
+      void persistState(context.board.id);
+    });
+    const text = document.createElement("span");
+    text.textContent = typeof item === "string" ? item : item.text || "";
+    row.append(checkbox, text);
+    if (editable) {
+      const removeButton = document.createElement("button");
+      removeButton.type = "button";
+      removeButton.className = "checklist-remove";
+      removeButton.setAttribute("aria-label", "Remover item");
+      removeButton.textContent = "×";
+      removeButton.addEventListener("click", () => {
+        const context = activeTaskContext && findTaskContext(activeTaskContext.taskId);
+        if (!context || !canEditBoard(context.board)) return;
+        context.task[property].splice(index, 1);
+        renderTaskPage();
+        void persistState(context.board.id);
+      });
+      row.append(removeButton);
+    }
+    container.append(row);
+  });
+}
+
+function addTaskListItem(event, property, input) {
+  event.preventDefault();
+  const context = activeTaskContext && findTaskContext(activeTaskContext.taskId);
+  const text = input.value.trim();
+  if (!context || !canEditBoard(context.board) || !text) return;
+  if (!Array.isArray(context.task[property])) context.task[property] = [];
+  context.task[property].push({ id: createId(), text, done: false });
+  input.value = "";
+  renderTaskPage();
+  void persistState(context.board.id);
+}
+
+function updateTaskFromPage() {
+  const context = activeTaskContext && findTaskContext(activeTaskContext.taskId);
+  if (!context || !canEditBoard(context.board)) return;
+  const assignee = elements.taskAssigneeInput.selectedOptions[0];
+  context.task.assigneeUid = elements.taskAssigneeInput.value;
+  context.task.assigneeName = assignee && assignee.value ? assignee.textContent : "";
+  context.task.dueDate = elements.taskPageDueDate.value;
+  context.task.priority = elements.taskPagePriority.value;
+  context.task.labels = Array.from(elements.taskPageLabels.selectedOptions, (option) => option.value);
+  const points = Number(elements.taskStoryPoints.value);
+  if (!Number.isInteger(points) || points < 0 || points > 100) {
+    showToast("Story points deve ser um inteiro entre 0 e 100.");
+    elements.taskStoryPoints.value = String(context.task.storyPoints || 0);
+    return;
+  }
+  context.task.storyPoints = points;
+  context.task.sprintId = elements.taskSprint.value;
+  renderColumns();
+  void persistState(context.board.id);
+}
+
+function renderComments(comments) {
+  elements.commentList.replaceChildren();
+  if (!comments.length) {
+    const empty = document.createElement("p");
+    empty.className = "empty-comments";
+    empty.textContent = "Ainda não há comentários.";
+    elements.commentList.append(empty);
+    return;
+  }
+  comments.forEach((comment) => {
+    const item = document.createElement("article");
+    item.className = "comment-item";
+    const meta = document.createElement("div");
+    meta.className = "comment-meta";
+    const author = document.createElement("strong");
+    author.textContent = comment.authorName || "Usuário";
+    const date = document.createElement("time");
+    const timestamp = comment.createdAt && typeof comment.createdAt.toDate === "function" ? comment.createdAt.toDate() : new Date();
+    date.dateTime = timestamp.toISOString();
+    date.textContent = new Intl.DateTimeFormat("pt-BR", { dateStyle: "short", timeStyle: "short" }).format(timestamp);
+    meta.append(author, date);
+    const text = document.createElement("p");
+    text.className = "comment-text";
+    text.textContent = comment.text;
+    item.append(meta, text);
+    elements.commentList.append(item);
+  });
+}
+
+async function submitTaskComment(event) {
+  event.preventDefault();
+  const text = elements.commentInput.value.trim();
+  const context = activeTaskContext && findTaskContext(activeTaskContext.taskId);
+  if (!context || !canEditBoard(context.board) || !text) return;
+  try {
+    await boardData.addComment(context.board.id, context.task.id, text, firebaseApi, db, currentUser);
+    elements.commentInput.value = "";
+  } catch (error) {
+    showToast(mapFirebaseError(error, "data"));
+  }
+}
+
+async function addSprint() {
+  const board = getActiveBoard();
+  if (!canEditBoard(board)) return;
+  const name = await promptDialog({ title: "Nova sprint", message: "Dê um nome para o ciclo de trabalho.", label: "Nome da sprint", placeholder: "Ex.: Sprint 1", maxLength: 80, confirmText: "Criar" });
+  if (!name) return;
+  board.sprints.push({ id: createId(), name: name.trim() });
+  void persistState(board.id);
+  showToast("Sprint criada.");
+}
+
+async function openMembersDialog() {
+  const board = getActiveBoard();
+  if (!board) return;
+  elements.membersError.textContent = "";
+  elements.inviteEmail.disabled = !isBoardOwner(board);
+  elements.inviteRole.disabled = !isBoardOwner(board);
+  elements.inviteMemberButton.hidden = !isBoardOwner(board);
+  await renderMembers(board);
+  elements.membersDialog.showModal();
+}
+
+async function renderMembers(board) {
+  const result = await boardData.listMembers(board.id, firebaseApi, db, isBoardOwner(board));
+  elements.memberList.replaceChildren();
+  result.members.forEach((member) => {
+    const row = document.createElement("div");
+    row.className = "member-row";
+    const identity = document.createElement("span");
+    identity.className = "member-identity";
+    identity.textContent = `${member.displayName || "Membro"}${member.email ? ` · ${member.email}` : ""}`;
+    const role = document.createElement("select");
+    role.className = "member-role";
+    role.setAttribute("aria-label", `Papel de ${member.displayName || member.email || "membro"}`);
+    ["OWNER", "EDITOR", "VIEWER"].forEach((value) => role.add(new Option(value === "OWNER" ? "Dono" : value === "EDITOR" ? "Editor" : "Leitor", value)));
+    role.value = member.role;
+    role.disabled = !isBoardOwner(board) || member.role === "OWNER";
+    role.addEventListener("change", async () => {
+      try {
+        await boardData.changeMemberRole(board.id, member.userUid, role.value, firebaseApi, db);
+        showToast("Papel atualizado.");
+      } catch (error) {
+        role.value = member.role;
+        showToast(mapFirebaseError(error, "data"));
+      }
+    });
+    row.append(identity, role);
+    if (isBoardOwner(board) && member.role !== "OWNER") {
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "icon-button small member-remove danger-icon";
+      remove.textContent = "×";
+      remove.title = "Remover acesso";
+      remove.setAttribute("aria-label", `Remover acesso de ${member.displayName || member.email || "membro"}`);
+      remove.addEventListener("click", async () => {
+        const confirmed = await confirmDialog({ title: "Remover membro", message: `Remover o acesso de ${member.displayName || member.email || "este membro"}?`, confirmText: "Remover", danger: true });
+        if (!confirmed) return;
+        try {
+          await boardData.removeMember(board.id, member.userUid, firebaseApi, db);
+          await renderMembers(board);
+          showToast("Acesso removido.");
+        } catch (error) {
+          showToast(mapFirebaseError(error, "data"));
+        }
+      });
+      row.append(remove);
+    }
+    elements.memberList.append(row);
+  });
+  result.invites.forEach((invite) => {
+    const row = document.createElement("div");
+    row.className = "member-row pending-invite";
+    const identity = document.createElement("span");
+    identity.className = "member-identity";
+    identity.textContent = `${invite.email} · convite pendente`;
+    const role = document.createElement("span");
+    role.className = "member-role-label";
+    role.textContent = invite.role === "VIEWER" ? "Leitor" : "Editor";
+    row.append(identity, role);
+    if (isBoardOwner(board)) {
+      const cancel = document.createElement("button");
+      cancel.type = "button";
+      cancel.className = "icon-button small member-remove danger-icon";
+      cancel.textContent = "×";
+      cancel.title = "Cancelar convite";
+      cancel.setAttribute("aria-label", `Cancelar convite para ${invite.email}`);
+      cancel.addEventListener("click", async () => {
+        try {
+          await firebaseApi.deleteDoc(firebaseApi.doc(db, "boardInvites", invite.id));
+          await renderMembers(board);
+          showToast("Convite cancelado.");
+        } catch (error) {
+          showToast(mapFirebaseError(error, "data"));
+        }
+      });
+      row.append(cancel);
+    }
+    elements.memberList.append(row);
+  });
+}
+
+async function inviteBoardMember() {
+  const board = getActiveBoard();
+  if (!isBoardOwner(board)) return;
+  const email = elements.inviteEmail.value.trim().toLowerCase();
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    elements.membersError.textContent = "Informe um e-mail válido.";
+    elements.inviteEmail.focus();
+    return;
+  }
+  if (email === (currentUser.email || "").toLowerCase()) {
+    elements.membersError.textContent = "Você já é o dono deste quadro.";
+    return;
+  }
+  try {
+    await boardData.inviteMember(board.id, email, elements.inviteRole.value, firebaseApi, db, currentUser);
+    elements.inviteEmail.value = "";
+    elements.membersError.textContent = "";
+    await renderMembers(board);
+    showToast("Convite pendente registrado. O acesso será ativado quando a pessoa entrar com este e-mail.");
+  } catch (error) {
+    elements.membersError.textContent = mapFirebaseError(error, "data");
+  }
 }
 
 // DRAG AND DROP
 function handleDragStart(event) {
+  if (!canEditBoard()) { event.preventDefault(); return; }
   const card = event.currentTarget;
   draggedTask = { taskId: card.dataset.taskId, columnId: card.dataset.columnId };
   card.classList.add("dragging");
@@ -924,20 +1426,24 @@ function handleDrop(event) {
   event.preventDefault();
   const targetColumnElement = event.currentTarget.closest(".column");
   targetColumnElement.classList.remove("drag-over");
-  if (!currentUser || !dataReady || !draggedTask) return;
+  if (!currentUser || !dataReady || !draggedTask || !canEditBoard()) return;
   const board = getActiveBoard();
   const sourceColumn = board && board.columns.find((column) => column.id === draggedTask.columnId);
   const targetColumn = board && board.columns.find((column) => column.id === targetColumnElement.dataset.columnId);
   if (!sourceColumn || !targetColumn) return;
   const sourceIndex = sourceColumn.tasks.findIndex((task) => task.id === draggedTask.taskId);
   if (sourceIndex < 0) return;
+  if (sourceColumn !== targetColumn && targetColumn.wipLimit && targetColumn.tasks.length >= targetColumn.wipLimit) {
+    showToast(`Limite WIP atingido em "${targetColumn.name}".`);
+    return;
+  }
   const [task] = sourceColumn.tasks.splice(sourceIndex, 1);
   const targetCard = event.target.closest(".task-card");
   let targetIndex = targetCard ? targetColumn.tasks.findIndex((item) => item.id === targetCard.dataset.taskId) : targetColumn.tasks.length;
   if (targetIndex < 0) targetIndex = targetColumn.tasks.length;
   targetColumn.tasks.splice(targetIndex, 0, task);
   renderColumns();
-  void persistState();
+  void persistState(board.id);
 }
 
 function applySearch() {
@@ -1032,16 +1538,32 @@ elements.changeBoardColorButton.addEventListener("click", () => { const board = 
 elements.deleteBoardButton.addEventListener("click", () => { const board = getActiveBoard(); if (board) deleteBoard(board); });
 elements.addTaskButton.addEventListener("click", () => {
   const board = getActiveBoard();
+  if (!canEditBoard(board)) return;
   if (!board || board.columns.length === 0) { showToast("Crie uma coluna antes de adicionar tarefas."); return; }
   const todoColumn = board.columns.find((column) => column.name.trim().toLocaleLowerCase("pt-BR") === "a fazer") || board.columns[0];
   openTaskModal(todoColumn.id);
 });
+elements.shareBoardButton.addEventListener("click", openMembersDialog);
+elements.addSprintButton.addEventListener("click", addSprint);
 elements.closeTaskDialog.addEventListener("click", () => elements.taskDialog.close());
 elements.cancelTaskButton.addEventListener("click", () => elements.taskDialog.close());
 elements.taskForm.addEventListener("submit", saveTaskFromDialog);
 elements.taskDialog.addEventListener("close", () => { editingTask = null; });
 elements.taskDialog.addEventListener("click", (event) => { if (event.target === elements.taskDialog) elements.taskDialog.close(); });
 elements.taskTitleInput.addEventListener("input", () => { elements.taskError.textContent = ""; });
+elements.closeMembersDialog.addEventListener("click", () => elements.membersDialog.close());
+elements.membersForm.addEventListener("submit", (event) => event.preventDefault());
+elements.inviteMemberButton.addEventListener("click", inviteBoardMember);
+elements.membersDialog.addEventListener("click", (event) => { if (event.target === elements.membersDialog) elements.membersDialog.close(); });
+elements.taskPageBackButton.addEventListener("click", () => {
+  if (activeBoardId) openBoard(activeBoardId);
+  else returnHome();
+});
+elements.checklistForm.addEventListener("submit", (event) => addTaskListItem(event, "checklist", elements.checklistInput));
+elements.acceptanceForm.addEventListener("submit", (event) => addTaskListItem(event, "acceptanceCriteria", elements.acceptanceInput));
+elements.commentForm.addEventListener("submit", submitTaskComment);
+[elements.taskAssigneeInput, elements.taskPageDueDate, elements.taskPagePriority, elements.taskPageLabels, elements.taskStoryPoints, elements.taskSprint]
+  .forEach((control) => control.addEventListener("change", updateTaskFromPage));
 elements.taskSearch.addEventListener("input", applySearch);
 elements.themeToggle.addEventListener("click", () => setTheme(document.body.classList.contains("dark-theme") ? "light" : "dark"));
 document.addEventListener("keydown", (event) => {
@@ -1052,7 +1574,11 @@ window.addEventListener("popstate", () => {
   if (!currentUser) {
     elements.appView.hidden = true;
     elements.authView.hidden = false;
+    return;
   }
+  const taskMatch = window.location.pathname.match(/^\/tasks\/([^/]+)\/?$/);
+  if (taskMatch) { void openTaskPage(decodeURIComponent(taskMatch[1])); return; }
+  if (activeTaskContext || activeBoardId) returnHome();
 });
 initializeImportDialog();
 try { setTheme(localStorage.getItem(THEME_KEY) || "light"); } catch { setTheme("light"); }

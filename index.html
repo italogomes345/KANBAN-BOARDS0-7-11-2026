@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#f4f6f7">
+  <base href="/">
   <title>Quadros | Kanban pessoal</title>
   <link rel="stylesheet" href="style.css">
   <script type="module" src="script.js"></script>
@@ -82,8 +83,16 @@
             </div>
             <button class="primary-button" id="createBoardButton" type="button"><span aria-hidden="true">＋</span> Criar quadro</button>
           </div>
-          <div id="boardGrid" class="board-grid" aria-live="polite"></div>
-          <p id="emptyBoards" class="empty-state" hidden>Você ainda não tem quadros. Crie o primeiro para começar.</p>
+          <section class="board-section" aria-labelledby="ownedBoardsTitle">
+            <h2 id="ownedBoardsTitle" class="section-title">Meus quadros</h2>
+            <div id="boardGrid" class="board-grid" aria-live="polite"></div>
+            <p id="emptyBoards" class="empty-state" hidden>Você ainda não tem quadros. Crie o primeiro para começar.</p>
+          </section>
+          <section class="board-section" aria-labelledby="sharedBoardsTitle">
+            <h2 id="sharedBoardsTitle" class="section-title">Compartilhados comigo</h2>
+            <div id="sharedBoardGrid" class="board-grid" aria-live="polite"></div>
+            <p id="emptySharedBoards" class="empty-state" hidden>Nenhum quadro compartilhado com você.</p>
+          </section>
         </section>
 
         <section id="boardView" class="view" aria-labelledby="boardTitle" hidden>
@@ -104,9 +113,58 @@
             </label>
           </div>
           <div class="board-actions">
+            <button id="shareBoardButton" class="secondary-button" type="button">Membros</button>
+            <button id="addSprintButton" class="secondary-button" type="button">Nova sprint</button>
             <button id="addTaskButton" class="primary-button" type="button"><span aria-hidden="true">＋</span> Adicionar nova tarefa</button>
           </div>
           <div id="columns" class="columns" aria-label="Colunas do quadro"></div>
+        </section>
+
+        <section id="taskPageView" class="view task-page-view" aria-labelledby="taskPageTitle" hidden>
+          <div class="task-page-toolbar">
+            <button id="taskPageBackButton" class="back-button" type="button"><span aria-hidden="true">←</span> Voltar ao quadro</button>
+            <span id="taskPageBoardName" class="task-page-board-name"></span>
+          </div>
+          <div class="task-page-layout">
+            <article class="task-page-main">
+              <p class="eyebrow">TAREFA</p>
+              <h1 id="taskPageTitle"></h1>
+              <p id="taskPageDescription" class="task-page-description"></p>
+              <section class="task-detail-section" aria-labelledby="acceptanceTitle">
+                <h2 id="acceptanceTitle">Critérios de aceite</h2>
+                <div id="acceptanceList" class="task-checklist"></div>
+                <form id="acceptanceForm" class="inline-entry-form">
+                  <input id="acceptanceInput" maxlength="160" placeholder="Adicionar critério" aria-label="Novo critério de aceite">
+                  <button class="secondary-button" type="submit">Adicionar</button>
+                </form>
+              </section>
+              <section class="task-detail-section" aria-labelledby="checklistTitle">
+                <div class="task-section-heading"><h2 id="checklistTitle">Checklist / Definition of Done</h2><span id="checklistProgress" class="muted-count"></span></div>
+                <div id="checklistItems" class="task-checklist"></div>
+                <form id="checklistForm" class="inline-entry-form">
+                  <input id="checklistInput" maxlength="160" placeholder="Adicionar item" aria-label="Novo item do checklist">
+                  <button class="secondary-button" type="submit">Adicionar</button>
+                </form>
+              </section>
+              <section class="task-detail-section" aria-labelledby="commentsTitle">
+                <h2 id="commentsTitle">Comentários</h2>
+                <div id="commentList" class="comment-list" aria-live="polite"></div>
+                <form id="commentForm" class="comment-form">
+                  <label class="visually-hidden" for="commentInput">Escreva um comentário</label>
+                  <textarea id="commentInput" rows="3" maxlength="2000" placeholder="Escreva um comentário..."></textarea>
+                  <button id="commentSubmit" class="primary-button" type="submit">Comentar</button>
+                </form>
+              </section>
+            </article>
+            <aside class="task-page-sidebar" aria-label="Propriedades da tarefa">
+              <div class="form-field"><label for="taskAssigneeInput">Responsável</label><select id="taskAssigneeInput"></select></div>
+              <div class="form-field"><label for="taskPageDueDate">Prazo</label><input id="taskPageDueDate" type="date"></div>
+              <div class="form-field"><label for="taskPagePriority">Prioridade</label><select id="taskPagePriority"><option value="baixa">Baixa</option><option value="media">Média</option><option value="alta">Alta</option></select></div>
+              <div class="form-field"><label for="taskPageLabels">Labels</label><select id="taskPageLabels" multiple size="3"><option value="Bug">Bug</option><option value="Feature">Feature</option><option value="Urgente">Urgente</option></select></div>
+              <div class="form-field"><label for="taskStoryPoints">Story points</label><input id="taskStoryPoints" type="number" min="0" max="100" step="1"></div>
+              <div class="form-field"><label for="taskSprint">Sprint</label><select id="taskSprint"></select></div>
+            </aside>
+          </div>
         </section>
       </div>
     </main>
@@ -160,6 +218,18 @@
         <button id="discardLegacyButton" class="secondary-button" type="button">Começar sem importar</button>
         <button id="importLegacyButton" class="primary-button" type="button">Importar quadros</button>
       </div>
+    </form>
+  </dialog>
+  <dialog id="membersDialog" class="task-dialog members-dialog">
+    <form id="membersForm" novalidate>
+      <div class="dialog-heading"><div><p class="eyebrow">ACESSO AO QUADRO</p><h2>Membros</h2></div><button class="icon-button" id="closeMembersDialog" type="button" aria-label="Fechar">×</button></div>
+      <div id="memberList" class="member-list"></div>
+      <div class="form-row member-invite-row">
+        <div class="form-field"><label for="inviteEmail">E-mail</label><input id="inviteEmail" type="email" maxlength="254" autocomplete="off"></div>
+        <div class="form-field"><label for="inviteRole">Papel</label><select id="inviteRole"><option value="EDITOR">Editor</option><option value="VIEWER">Leitor</option></select></div>
+      </div>
+      <p id="membersError" class="form-error" role="alert" aria-live="polite"></p>
+      <div class="dialog-actions"><button id="inviteMemberButton" class="primary-button" type="button">Convidar</button></div>
     </form>
   </dialog>
   <div id="toast" class="toast" role="status" aria-live="polite"></div>

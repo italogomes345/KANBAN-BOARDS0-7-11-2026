@@ -31,48 +31,57 @@ Aplicação estática em HTML, CSS e JavaScript. Não precisa de Node.js nem npm
 
 ## 3. Estrutura dos dados
 
-O documento `boards/{uid}` contém `ownerUid`, `schemaVersion`, `boards` e `updatedAt`. Cada board inclui colunas e tarefas. O identificador do documento corresponde ao UID do Firebase Authentication. As alterações do Kanban são sincronizadas pelo app.
+O modelo atual separa os dados por quadro:
 
-A aplicação valida tipos, tamanho de títulos/descrições, quantidades e tamanho total antes de exibir ou enviar os dados. As regras impõem autenticação, ownership e o formato básico do documento. As regras do Firestore não fazem uma validação profunda de cada elemento arbitrário de arrays; por isso, dados recebidos também são validados no cliente. O documento único é adequado para um projeto pequeno, mas o Firestore limita documentos a 1 MiB.
+- `boards/{boardId}`: metadados, colunas, backlog, sprints e Definition of Done.
+- `boards/{boardId}/members/{uid}`: papel `OWNER`, `EDITOR` ou `VIEWER` e identidade do membro.
+- `boards/{boardId}/tasks/{taskId}`: tarefa, responsável, prazo, prioridade, labels, checklist, critérios de aceite e story points.
+- `boards/{boardId}/tasks/{taskId}/comments/{commentId}`: texto, autor e timestamp.
+- `boardInvites/{inviteId}`: convites pendentes por e-mail; a conta resgata o convite ao entrar com o mesmo endereço.
+- `userMigrations/{uid}`: marcador para que a migração do formato antigo ocorra uma só vez.
+
+No primeiro login após a atualização, o app migra `boards/{uid}` (schema 1) para quadros individuais (schema 2), preservando o documento antigo como cópia. A importação local já existente continua disponível quando não há dados Firestore anteriores.
 
 ## 4. Regras de segurança
 
-O texto completo está em `firestore.rules` e pode ser copiado para a aba **Regras** do Firestore. Como o arquivo está vinculado no `firebase.json`, também é possível publicá-lo pelo CLI com `firebase deploy --only firestore:rules --project boards-kanban`. Usuários não autenticados são negados. Um usuário só pode acessar o documento cujo ID é seu próprio UID. Campos adicionais são rejeitados, assim como tipos incorretos no nível superior e mais de 20 boards.
+As regras em `firestore.rules` verificam associação e papel no servidor: membros podem ler; `OWNER` e `EDITOR` podem editar tarefas e comentar; apenas `OWNER` pode administrar membros, alterar nome/cor ou excluir o quadro. A interface também oculta/desabilita ações de leitura, mas a segurança não depende dela. A exclusão do último registro de membro não concede acesso: as regras consultam o UID autenticado em cada operação.
 
 O `firebaseConfig` de um app Web não é segredo: ele é entregue ao navegador. A proteção dos dados vem das regras do Firestore e da validação de identidade pelo Firebase Authentication, não de esconder a configuração. Não coloque senhas, tokens privados ou credenciais de usuário no config. Regras não podem ficar abertas ou em modo de teste.
 
 ### Testar as regras no simulador
 
 1. Abra **Firestore Database > Regras > Simulador de regras**.
-2. Tente ler `/boards/uid-de-teste` sem autenticação: a operação deve ser negada.
-3. Simule usuário autenticado com UID `usuario-a` e tente ler `/boards/usuario-b`: deve ser negada.
-4. Simule usuário autenticado com UID `usuario-a` e leia `/boards/usuario-a`: deve ser permitida se o documento existir.
-5. Teste escrita autenticada com `ownerUid` diferente do UID ou com `schemaVersion`/`boards` de tipo inválido: deve ser negada.
+2. Sem autenticação, tente ler `/boards/{boardId}`: deve ser negada.
+3. Como membro, leia o quadro e as tarefas: deve ser permitido.
+4. Como `VIEWER`, tente criar/alterar uma tarefa ou comentário: deve ser negado.
+5. Como `EDITOR`, tente editar uma tarefa: deve ser permitido; tente renomear o quadro ou alterar membros: deve ser negado.
+6. Como `OWNER`, convide um e-mail, altere o papel e remova o membro: deve ser permitido.
 
-## 5. Publicar com HTTPS
+## 5. Publicar e demonstrar
 
-### GitHub Pages
+O Hosting possui rewrite para `/tasks/**`, necessário para abrir links profundos diretamente. Publique o Hosting e as regras juntos:
 
-1. Envie `index.html`, `style.css`, `script.js`, `firestore.rules` e `README.md` para a raiz do repositório.
-2. Como `firebase-config.js` está no `.gitignore`, o GitHub Pages não o receberá automaticamente. Para um site estático, o config do Firebase Web é público por definição; depois de conferir que contém somente a configuração do app (nunca senhas ou tokens privados), inclua esse arquivo no repositório para o Pages servi-lo.
-3. No computador, preencha `firebase-config.js` com os valores do seu projeto. O arquivo ignorado pode ser incluído explicitamente com `git add -f firebase-config.js` quando decidir publicar o app estático.
-4. No GitHub, abra **Settings > Pages**, selecione **Deploy from a branch**, escolha `main` e `/ (root)`, e salve.
-5. Aguarde o endereço `https://<usuario>.github.io/<repositorio>/`. Confirme que abre com HTTPS.
-6. No Firebase, abra **Authentication > Configurações > Domínios autorizados** e adicione o domínio do Pages (por exemplo, `<usuario>.github.io`). Sem isso, o login publicado pode falhar.
-7. Abra a URL em outro computador e teste cadastro/login e boards. Firestore sincroniza dados autenticados; a preferência de tema continua local.
+```powershell
+firebase deploy --project boards-kanban
+```
 
-### Netlify ou Vercel
+Depois, confirme que o domínio `boards-kanban.web.app` está em **Authentication > Configurações > Domínios autorizados**.
 
-1. Importe o repositório ou envie a pasta estática pelo painel da plataforma; não configure comando de build nem instalação npm.
-2. Garanta que `firebase-config.js` esteja disponível na raiz publicada, seguindo o mesmo cuidado: somente configuração pública do app Web.
-3. Use o domínio HTTPS gerado pela plataforma e adicione esse domínio em **Authentication > Configurações > Domínios autorizados** no Firebase.
-4. Teste a URL pública e o login em outro computador.
+### Demo de 2 minutos com duas contas
+
+1. Na conta A, crie um quadro, abra **Membros**, convide o e-mail da conta B como `VIEWER` e copie o link da tarefa para compartilhar por um canal externo.
+2. Entre na conta B em outro perfil do navegador, aceite o convite ao entrar e abra o quadro em **Compartilhados comigo**.
+3. Na conta B, tente criar uma tarefa: os controles de edição devem estar ausentes; uma tentativa direta de escrita no Firestore deve ser negada pelas regras.
+4. Abra o link `/tasks/{id}` em nova aba enquanto B está autenticada. Confira leitura dos campos e comentários existentes.
+5. Na conta A, altere B para `EDITOR`. Atualize B, edite uma tarefa e publique um comentário; confira a atualização no quadro e o autor/data do comentário.
+6. Na conta A, remova B. Atualize a tela B e confirme que o quadro deixa de estar acessível.
 
 ## 6. Limitações conhecidas
 
 - O Firebase Authentication gerencia credenciais e sessão; o app não grava UID, e-mail, senha ou token em `localStorage`.
 - O tema claro/escuro continua salvo em `localStorage`; não contém dados de conta.
 - Tentativas repetidas são limitadas pelo próprio Firebase. O app traduz `auth/too-many-requests`, mas não implementa rate limit no servidor.
-- O projeto não implementa verificação de e-mail nem App Check.
-- Regras impedem acesso ao documento de outra pessoa, mas não evitam que o próprio usuário autenticado apague ou altere seus boards.
+- O projeto não implementa verificação de e-mail, App Check, Cloud Functions ou envio automático de e-mail. Convites ficam pendentes no Firestore e são resgatados no login; o envio da notificação deve ser feito por fora.
+- WIP é validado no fluxo de interface; a autorização de leitura/escrita é sempre validada pelas regras Firestore.
+- O histórico de atividades e notificações não foi incluído; são recursos bônus, fora dos critérios mínimos implementados.
 - Um site estático não consegue manter `firebase-config.js` privado no navegador; isso não é uma fronteira de segurança do Firebase.
