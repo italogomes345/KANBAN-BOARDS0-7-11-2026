@@ -113,25 +113,6 @@
     <footer class="app-footer">Feito para deixar suas ideias em movimento.</footer>
   </div>
 
-  <dialog id="promptDialog" class="task-dialog prompt-dialog">
-    <form id="promptForm" novalidate>
-      <div class="dialog-heading">
-        <div><p class="eyebrow">DETALHES</p><h2 id="promptTitle">Nome do item</h2></div>
-        <button class="icon-button" id="closePromptDialog" type="button" aria-label="Fechar">×</button>
-      </div>
-      <p id="promptDescription" class="prompt-description">Defina o texto que será exibido para este item.</p>
-      <div class="form-field">
-        <label id="promptLabel" for="promptInput">Nome</label>
-        <input id="promptInput" name="promptValue" type="text" maxlength="100" autocomplete="off">
-      </div>
-      <p id="promptError" class="form-error" role="alert" aria-live="polite"></p>
-      <div class="dialog-actions">
-        <button class="secondary-button" id="cancelPromptButton" type="button">Cancelar</button>
-        <button class="primary-button" type="submit">OK</button>
-      </div>
-    </form>
-  </dialog>
-
   <dialog id="taskDialog" class="task-dialog">
     <form id="taskForm" novalidate>
       <div class="dialog-heading">

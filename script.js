@@ -1,4 +1,5 @@
 import { firebaseConfig } from "./firebase-config.js";
+import { alertDialog, confirmDialog, promptDialog } from "./dialogs.js";
 
 const FIREBASE_VERSION = "11.10.0";
 const BOARDS_COLLECTION = "boards";
@@ -16,12 +17,11 @@ const elements = Object.fromEntries([
   "usernameField", "usernameInput", "emailField", "emailInput", "loginIdentifier", "passwordInput", "togglePassword",
   "confirmField", "confirmPasswordInput", "toggleConfirmPassword", "userName", "logoutButton", "appView", "loadingView",
   "loadingMessage", "dataErrorView", "dataErrorMessage", "retryDataButton", "homeView", "boardView", "boardGrid", "emptyBoards",
-  "boardTitle", "activeBoardColor", "columns", "taskSearch", "promptDialog", "promptForm", "promptTitle", "promptDescription",
-  "promptLabel", "promptInput", "promptError", "taskDialog", "taskForm", "taskTitleInput", "taskDescriptionInput",
-  "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog", "importForm",
+  "boardTitle", "activeBoardColor", "columns", "taskSearch", "taskDialog", "taskForm", "taskTitleInput",
+  "taskDescriptionInput", "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog", "importForm",
   "legacyProfileField", "legacyProfileSelect", "importLegacyButton", "discardLegacyButton", "toast", "themeToggle", "themeIcon",
   "createBoardButton", "backButton", "renameBoardButton", "changeBoardColorButton", "deleteBoardButton", "addTaskButton",
-  "closePromptDialog", "cancelPromptButton", "closeTaskDialog", "cancelTaskButton"
+  "closeTaskDialog", "cancelTaskButton"
 ].map((id) => [id, document.getElementById(id)]));
 
 let firebaseApi = null;
@@ -40,7 +40,6 @@ let saveQueue = Promise.resolve();
 let importChoices = [];
 let importDialogResolver = null;
 let dataReady = false;
-let activePrompt = null;
 
 function createId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -713,101 +712,116 @@ function goHome() {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-function renameBoard(board) {
-  openPromptModal({
+async function renameBoard(board) {
+  const name = await promptDialog({
     title: "Renomear quadro",
-    description: "Atualize o nome que aparece no seu quadro e no painel da organização.",
-    label: "Nome do quadro",
+    message: "Atualize o nome que aparece no seu quadro e no painel da organização.",
+    label: "Qual será o novo nome do quadro?",
     defaultValue: board.name,
-    maxLength: 100,
     placeholder: "Digite o novo nome do quadro",
-    validate: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed || trimmed.length > 100) return "Informe um nome com até 100 caracteres.";
-      return "";
-    },
-    onConfirm: (value) => {
-      board.name = value;
-      renderBoards();
-      if (board.id === activeBoardId) elements.boardTitle.textContent = board.name;
-      void persistState();
-    }
+    maxLength: 100,
+    confirmText: "OK",
+    cancelText: "Cancelar"
   });
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.length > 100) {
+    showToast("Informe um nome com até 100 caracteres.");
+    return;
+  }
+  board.name = trimmed;
+  renderBoards();
+  if (board.id === activeBoardId) elements.boardTitle.textContent = board.name;
+  void persistState();
 }
 
-function changeBoardColor(board) {
-  openPromptModal({
+async function changeBoardColor(board) {
+  const color = await promptDialog({
     title: "Definir cor do quadro",
-    description: `Escolha uma cor em hexadecimal para identificar este quadro. Exemplo: ${BOARD_COLORS[0]}.`,
+    message: `Escolha uma cor em hexadecimal para identificar este quadro. Exemplo: ${BOARD_COLORS[0]}.`,
     label: "Cor do quadro",
     defaultValue: board.color,
-    maxLength: 7,
     placeholder: "#16836d",
-    validate: (value) => {
-      const trimmed = value.trim();
-      if (!/^#[0-9a-fA-F]{6}$/.test(trimmed)) return "Use uma cor hexadecimal válida, como #16836d.";
-      return "";
-    },
-    onConfirm: (value) => {
-      board.color = value;
-      renderBoards();
-      if (board.id === activeBoardId) elements.activeBoardColor.style.backgroundColor = board.color;
-      void persistState();
-    }
+    maxLength: 7,
+    confirmText: "OK",
+    cancelText: "Cancelar"
   });
+  if (color === null) return;
+  const trimmedColor = color.trim();
+  if (!/^#[0-9a-fA-F]{6}$/.test(trimmedColor)) { showToast("Use uma cor hexadecimal válida, como #16836d."); return; }
+  board.color = trimmedColor;
+  renderBoards();
+  if (board.id === activeBoardId) elements.activeBoardColor.style.backgroundColor = board.color;
+  void persistState();
 }
 
-function deleteBoard(board) {
-  if (!window.confirm(`Excluir o quadro "${board.name}" e todas as suas tarefas? Esta ação não pode ser desfeita.`)) return;
+async function deleteBoard(board) {
+  const confirmed = await confirmDialog({
+    title: "Excluir quadro",
+    message: `Excluir o quadro "${board.name}" e todas as suas tarefas? Esta ação não pode ser desfeita.`,
+    confirmText: "Excluir",
+    cancelText: "Cancelar",
+    danger: true
+  });
+  if (!confirmed) return;
   state.boards = state.boards.filter((item) => item.id !== board.id);
   if (activeBoardId === board.id) returnHome(); else renderBoards();
   void persistState();
   showToast("Quadro excluído.");
 }
 
-function addColumn() {
-  openPromptModal({
+async function addColumn() {
+  const name = await promptDialog({
     title: "Nova coluna",
-    description: "Crie uma coluna para separar etapas do trabalho, como 'A fazer' ou 'Concluído'.",
+    message: "Crie uma coluna para separar etapas do trabalho, como 'A fazer' ou 'Concluído'.",
     label: "Nome da coluna",
     placeholder: "Digite o nome da coluna",
     maxLength: 60,
-    validate: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed || trimmed.length > 60) return "Informe um nome de coluna com até 60 caracteres.";
-      return "";
-    },
-    onConfirm: (value) => {
-      getActiveBoard().columns.push({ id: createId(), name: value, tasks: [] });
-      renderColumns();
-      void persistState();
-    }
+    confirmText: "OK",
+    cancelText: "Cancelar"
   });
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.length > 60) {
+    showToast("Informe um nome de coluna com até 60 caracteres.");
+    return;
+  }
+  getActiveBoard().columns.push({ id: createId(), name: trimmed, tasks: [] });
+  renderColumns();
+  void persistState();
 }
 
-function renameColumn(column) {
-  openPromptModal({
+async function renameColumn(column) {
+  const name = await promptDialog({
     title: "Renomear coluna",
-    description: "Atualize o título da coluna para refletir melhor a etapa atual do trabalho.",
-    label: "Nome da coluna",
+    message: "Atualize o título da coluna para refletir melhor a etapa atual do trabalho.",
+    label: "Qual será o novo nome da coluna?",
     defaultValue: column.name,
-    maxLength: 60,
     placeholder: "Digite o novo nome da coluna",
-    validate: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed || trimmed.length > 60) return "Informe um nome de coluna com até 60 caracteres.";
-      return "";
-    },
-    onConfirm: (value) => {
-      column.name = value;
-      renderColumns();
-      void persistState();
-    }
+    maxLength: 60,
+    confirmText: "OK",
+    cancelText: "Cancelar"
   });
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.length > 60) {
+    showToast("Informe um nome de coluna com até 60 caracteres.");
+    return;
+  }
+  column.name = trimmed;
+  renderColumns();
+  void persistState();
 }
 
-function deleteColumn(column) {
-  if (!window.confirm(`Excluir a coluna "${column.name}" e todas as tarefas dela?`)) return;
+async function deleteColumn(column) {
+  const confirmed = await confirmDialog({
+    title: "Excluir coluna",
+    message: `Excluir a coluna "${column.name}" e todas as tarefas dela?`,
+    confirmText: "Excluir",
+    cancelText: "Cancelar",
+    danger: true
+  });
+  if (!confirmed) return;
   const board = getActiveBoard();
   board.columns = board.columns.filter((item) => item.id !== column.id);
   renderColumns();
@@ -861,12 +875,20 @@ function saveTaskFromDialog(event) {
   showToast("Tarefa salva.");
 }
 
-function deleteTask(columnId, taskId) {
+async function deleteTask(columnId, taskId) {
   if (!currentUser || !dataReady) return;
   const board = getActiveBoard();
   const column = board && board.columns.find((item) => item.id === columnId);
   const task = column && column.tasks.find((item) => item.id === taskId);
-  if (!task || !window.confirm(`Excluir a tarefa "${task.title}"?`)) return;
+  if (!task) return;
+  const confirmed = await confirmDialog({
+    title: "Excluir tarefa",
+    message: `Excluir a tarefa "${task.title}"?`,
+    confirmText: "Excluir",
+    cancelText: "Cancelar",
+    danger: true
+  });
+  if (!confirmed) return;
   column.tasks = column.tasks.filter((item) => item.id !== taskId);
   renderColumns();
   void persistState();
@@ -938,40 +960,6 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 3000);
 }
 
-function openPromptModal({ title, description, label, defaultValue = "", placeholder = "", maxLength = 100, validate = () => "", onConfirm }) {
-  activePrompt = { validate, onConfirm };
-  elements.promptTitle.textContent = title;
-  elements.promptDescription.textContent = description || "";
-  elements.promptLabel.textContent = label;
-  elements.promptInput.value = defaultValue;
-  elements.promptInput.placeholder = placeholder;
-  elements.promptInput.maxLength = maxLength;
-  elements.promptError.textContent = "";
-  elements.promptDialog.showModal();
-  elements.promptInput.focus();
-  elements.promptInput.select();
-}
-
-function closePromptModal() {
-  elements.promptDialog.close();
-  elements.promptError.textContent = "";
-  activePrompt = null;
-}
-
-function submitPromptModal(event) {
-  event.preventDefault();
-  if (!activePrompt) return;
-  const value = elements.promptInput.value;
-  const validationMessage = activePrompt.validate(value);
-  if (validationMessage) {
-    elements.promptError.textContent = validationMessage;
-    elements.promptInput.focus();
-    return;
-  }
-  activePrompt.onConfirm(value.trim());
-  closePromptModal();
-}
-
 function setTheme(theme) {
   const isDark = theme === "dark";
   document.body.classList.toggle("dark-theme", isDark);
@@ -1019,21 +1007,24 @@ elements.toggleConfirmPassword.addEventListener("click", () => setPasswordVisibi
 elements.homeLink.addEventListener("click", (event) => { event.preventDefault(); goHome(); });
 elements.logoutButton.addEventListener("click", logoutUser);
 elements.retryDataButton.addEventListener("click", retryLoadingData);
-elements.createBoardButton.addEventListener("click", () => {
+elements.createBoardButton.addEventListener("click", async () => {
   if (!currentUser || !dataReady) return;
-  openPromptModal({
+  const name = await promptDialog({
     title: "Novo quadro",
-    description: "Crie um quadro para organizar ideias, tarefas e próximos passos do seu trabalho.",
-    label: "Nome do quadro",
+    message: "Crie um quadro para organizar ideias, tarefas e próximos passos do seu trabalho.",
+    label: "Qual será o nome do quadro?",
     placeholder: "Digite o nome do quadro",
     maxLength: 100,
-    validate: (value) => {
-      const trimmed = value.trim();
-      if (!trimmed || trimmed.length > 100) return "Informe um nome para o quadro com até 100 caracteres.";
-      return "";
-    },
-    onConfirm: (value) => createBoard(value)
+    confirmText: "OK",
+    cancelText: "Cancelar"
   });
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed || trimmed.length > 100) {
+    showToast("Informe um nome para o quadro com até 100 caracteres.");
+    return;
+  }
+  createBoard(trimmed);
 });
 elements.backButton.addEventListener("click", returnHome);
 elements.renameBoardButton.addEventListener("click", () => { const board = getActiveBoard(); if (board) renameBoard(board); });
@@ -1045,11 +1036,6 @@ elements.addTaskButton.addEventListener("click", () => {
   const todoColumn = board.columns.find((column) => column.name.trim().toLocaleLowerCase("pt-BR") === "a fazer") || board.columns[0];
   openTaskModal(todoColumn.id);
 });
-elements.closePromptDialog.addEventListener("click", closePromptModal);
-elements.cancelPromptButton.addEventListener("click", closePromptModal);
-elements.promptForm.addEventListener("submit", submitPromptModal);
-elements.promptDialog.addEventListener("close", () => { activePrompt = null; });
-elements.promptDialog.addEventListener("click", (event) => { if (event.target === elements.promptDialog) closePromptModal(); });
 elements.closeTaskDialog.addEventListener("click", () => elements.taskDialog.close());
 elements.cancelTaskButton.addEventListener("click", () => elements.taskDialog.close());
 elements.taskForm.addEventListener("submit", saveTaskFromDialog);
