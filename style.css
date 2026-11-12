@@ -168,8 +168,9 @@ body.dark-theme .primary-button { color: #14251f; }
 
 /* MODAL E AVISOS */
 .task-dialog { width: min(480px, calc(100vw - 28px)); padding: 23px; border: 1px solid var(--line); border-radius: 14px; color: var(--text); background: var(--surface); box-shadow: 0 20px 70px rgba(14, 30, 23, .25); }
+.prompt-dialog { width: min(560px, calc(100vw - 28px)); }
 .import-dialog { width: min(540px, calc(100vw - 28px)); }
-.import-description { color: var(--muted); font-size: 13px; line-height: 1.6; }
+.prompt-description, .import-description { color: var(--muted); font-size: 13px; line-height: 1.6; }
 .task-dialog::backdrop { background: rgba(17, 26, 22, .48); backdrop-filter: blur(2px); }
 .dialog-heading { display: flex; align-items: flex-start; justify-content: space-between; margin-bottom: 18px; }
 .dialog-heading h2 { margin: 0; font-size: 20px; }

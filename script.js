@@ -16,11 +16,12 @@ const elements = Object.fromEntries([
   "usernameField", "usernameInput", "emailField", "emailInput", "loginIdentifier", "passwordInput", "togglePassword",
   "confirmField", "confirmPasswordInput", "toggleConfirmPassword", "userName", "logoutButton", "appView", "loadingView",
   "loadingMessage", "dataErrorView", "dataErrorMessage", "retryDataButton", "homeView", "boardView", "boardGrid", "emptyBoards",
-  "boardTitle", "activeBoardColor", "columns", "taskSearch", "taskDialog", "taskForm", "taskTitleInput",
-  "taskDescriptionInput", "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog", "importForm",
+  "boardTitle", "activeBoardColor", "columns", "taskSearch", "promptDialog", "promptForm", "promptTitle", "promptDescription",
+  "promptLabel", "promptInput", "promptError", "taskDialog", "taskForm", "taskTitleInput", "taskDescriptionInput",
+  "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog", "importForm",
   "legacyProfileField", "legacyProfileSelect", "importLegacyButton", "discardLegacyButton", "toast", "themeToggle", "themeIcon",
   "createBoardButton", "backButton", "renameBoardButton", "changeBoardColorButton", "deleteBoardButton", "addTaskButton",
-  "closeTaskDialog", "cancelTaskButton"
+  "closePromptDialog", "cancelPromptButton", "closeTaskDialog", "cancelTaskButton"
 ].map((id) => [id, document.getElementById(id)]));
 
 let firebaseApi = null;
@@ -39,6 +40,7 @@ let saveQueue = Promise.resolve();
 let importChoices = [];
 let importDialogResolver = null;
 let dataReady = false;
+let activePrompt = null;
 
 function createId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
@@ -712,23 +714,47 @@ function goHome() {
 }
 
 function renameBoard(board) {
-  const name = window.prompt("Qual será o novo nome do quadro?", board.name);
-  if (name === null) return;
-  if (!name.trim() || name.trim().length > 100) { showToast("Informe um nome com até 100 caracteres."); return; }
-  board.name = name.trim();
-  renderBoards();
-  if (board.id === activeBoardId) elements.boardTitle.textContent = board.name;
-  void persistState();
+  openPromptModal({
+    title: "Renomear quadro",
+    description: "Atualize o nome que aparece no seu quadro e no painel da organização.",
+    label: "Nome do quadro",
+    defaultValue: board.name,
+    maxLength: 100,
+    placeholder: "Digite o novo nome do quadro",
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.length > 100) return "Informe um nome com até 100 caracteres.";
+      return "";
+    },
+    onConfirm: (value) => {
+      board.name = value;
+      renderBoards();
+      if (board.id === activeBoardId) elements.boardTitle.textContent = board.name;
+      void persistState();
+    }
+  });
 }
 
 function changeBoardColor(board) {
-  const color = window.prompt(`Informe uma cor hexadecimal (ex.: ${BOARD_COLORS[0]}):`, board.color);
-  if (color === null) return;
-  if (!/^#[0-9a-fA-F]{6}$/.test(color.trim())) { showToast("Use uma cor hexadecimal válida, como #16836d."); return; }
-  board.color = color.trim();
-  renderBoards();
-  if (board.id === activeBoardId) elements.activeBoardColor.style.backgroundColor = board.color;
-  void persistState();
+  openPromptModal({
+    title: "Definir cor do quadro",
+    description: `Escolha uma cor em hexadecimal para identificar este quadro. Exemplo: ${BOARD_COLORS[0]}.`,
+    label: "Cor do quadro",
+    defaultValue: board.color,
+    maxLength: 7,
+    placeholder: "#16836d",
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (!/^#[0-9a-fA-F]{6}$/.test(trimmed)) return "Use uma cor hexadecimal válida, como #16836d.";
+      return "";
+    },
+    onConfirm: (value) => {
+      board.color = value;
+      renderBoards();
+      if (board.id === activeBoardId) elements.activeBoardColor.style.backgroundColor = board.color;
+      void persistState();
+    }
+  });
 }
 
 function deleteBoard(board) {
@@ -740,21 +766,44 @@ function deleteBoard(board) {
 }
 
 function addColumn() {
-  const name = window.prompt("Nome da nova coluna:");
-  if (name === null) return;
-  if (!name.trim() || name.trim().length > 60) { showToast("Informe um nome de coluna com até 60 caracteres."); return; }
-  getActiveBoard().columns.push({ id: createId(), name: name.trim(), tasks: [] });
-  renderColumns();
-  void persistState();
+  openPromptModal({
+    title: "Nova coluna",
+    description: "Crie uma coluna para separar etapas do trabalho, como 'A fazer' ou 'Concluído'.",
+    label: "Nome da coluna",
+    placeholder: "Digite o nome da coluna",
+    maxLength: 60,
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.length > 60) return "Informe um nome de coluna com até 60 caracteres.";
+      return "";
+    },
+    onConfirm: (value) => {
+      getActiveBoard().columns.push({ id: createId(), name: value, tasks: [] });
+      renderColumns();
+      void persistState();
+    }
+  });
 }
 
 function renameColumn(column) {
-  const name = window.prompt("Qual será o novo nome da coluna?", column.name);
-  if (name === null) return;
-  if (!name.trim() || name.trim().length > 60) { showToast("Informe um nome de coluna com até 60 caracteres."); return; }
-  column.name = name.trim();
-  renderColumns();
-  void persistState();
+  openPromptModal({
+    title: "Renomear coluna",
+    description: "Atualize o título da coluna para refletir melhor a etapa atual do trabalho.",
+    label: "Nome da coluna",
+    defaultValue: column.name,
+    maxLength: 60,
+    placeholder: "Digite o novo nome da coluna",
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.length > 60) return "Informe um nome de coluna com até 60 caracteres.";
+      return "";
+    },
+    onConfirm: (value) => {
+      column.name = value;
+      renderColumns();
+      void persistState();
+    }
+  });
 }
 
 function deleteColumn(column) {
@@ -889,6 +938,40 @@ function showToast(message) {
   toastTimer = window.setTimeout(() => elements.toast.classList.remove("visible"), 3000);
 }
 
+function openPromptModal({ title, description, label, defaultValue = "", placeholder = "", maxLength = 100, validate = () => "", onConfirm }) {
+  activePrompt = { validate, onConfirm };
+  elements.promptTitle.textContent = title;
+  elements.promptDescription.textContent = description || "";
+  elements.promptLabel.textContent = label;
+  elements.promptInput.value = defaultValue;
+  elements.promptInput.placeholder = placeholder;
+  elements.promptInput.maxLength = maxLength;
+  elements.promptError.textContent = "";
+  elements.promptDialog.showModal();
+  elements.promptInput.focus();
+  elements.promptInput.select();
+}
+
+function closePromptModal() {
+  elements.promptDialog.close();
+  elements.promptError.textContent = "";
+  activePrompt = null;
+}
+
+function submitPromptModal(event) {
+  event.preventDefault();
+  if (!activePrompt) return;
+  const value = elements.promptInput.value;
+  const validationMessage = activePrompt.validate(value);
+  if (validationMessage) {
+    elements.promptError.textContent = validationMessage;
+    elements.promptInput.focus();
+    return;
+  }
+  activePrompt.onConfirm(value.trim());
+  closePromptModal();
+}
+
 function setTheme(theme) {
   const isDark = theme === "dark";
   document.body.classList.toggle("dark-theme", isDark);
@@ -938,10 +1021,19 @@ elements.logoutButton.addEventListener("click", logoutUser);
 elements.retryDataButton.addEventListener("click", retryLoadingData);
 elements.createBoardButton.addEventListener("click", () => {
   if (!currentUser || !dataReady) return;
-  const name = window.prompt("Qual será o nome do quadro?");
-  if (name === null) return;
-  if (!name.trim() || name.trim().length > 100) { showToast("Informe um nome para o quadro com até 100 caracteres."); return; }
-  createBoard(name.trim());
+  openPromptModal({
+    title: "Novo quadro",
+    description: "Crie um quadro para organizar ideias, tarefas e próximos passos do seu trabalho.",
+    label: "Nome do quadro",
+    placeholder: "Digite o nome do quadro",
+    maxLength: 100,
+    validate: (value) => {
+      const trimmed = value.trim();
+      if (!trimmed || trimmed.length > 100) return "Informe um nome para o quadro com até 100 caracteres.";
+      return "";
+    },
+    onConfirm: (value) => createBoard(value)
+  });
 });
 elements.backButton.addEventListener("click", returnHome);
 elements.renameBoardButton.addEventListener("click", () => { const board = getActiveBoard(); if (board) renameBoard(board); });
@@ -953,6 +1045,11 @@ elements.addTaskButton.addEventListener("click", () => {
   const todoColumn = board.columns.find((column) => column.name.trim().toLocaleLowerCase("pt-BR") === "a fazer") || board.columns[0];
   openTaskModal(todoColumn.id);
 });
+elements.closePromptDialog.addEventListener("click", closePromptModal);
+elements.cancelPromptButton.addEventListener("click", closePromptModal);
+elements.promptForm.addEventListener("submit", submitPromptModal);
+elements.promptDialog.addEventListener("close", () => { activePrompt = null; });
+elements.promptDialog.addEventListener("click", (event) => { if (event.target === elements.promptDialog) closePromptModal(); });
 elements.closeTaskDialog.addEventListener("click", () => elements.taskDialog.close());
 elements.cancelTaskButton.addEventListener("click", () => elements.taskDialog.close());
 elements.taskForm.addEventListener("submit", saveTaskFromDialog);
