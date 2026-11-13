@@ -41,21 +41,29 @@ function trapFocus(dialog, event) {
   }
 }
 
-function closeDialog(dialog, resolve, value) {
-  if (!dialog) return;
-  const previousFocus = dialog.dataset.lastFocus ? document.getElementById(dialog.dataset.lastFocus) : null;
-  if (dialog.open) dialog.close();
-  dialog.removeAttribute("data-last-focus");
-  if (typeof resolve === "function") resolve(value);
-  if (previousFocus && typeof previousFocus.focus === "function") {
-    requestAnimationFrame(() => previousFocus.focus());
-  }
+function restoreDialogFocus(dialog) {
+  const previousFocus = dialog.previousFocusElement;
+  dialog.previousFocusElement = null;
+  if (previousFocus && previousFocus.isConnected) requestAnimationFrame(() => previousFocus.focus());
+}
+
+function registerDialogDismissal(dialog, dismiss) {
+  const controller = new AbortController();
+  dialog.addEventListener("keydown", (event) => trapFocus(dialog, event), { signal: controller.signal });
+  dialog.addEventListener("cancel", (event) => {
+    event.preventDefault();
+    dismiss();
+  }, { signal: controller.signal });
+  dialog.addEventListener("click", (event) => {
+    if (event.target === dialog) dismiss();
+  }, { signal: controller.signal });
+  return () => controller.abort();
 }
 
 function buildDialogShell({ title, message, confirmText, cancelText, variant = "prompt", description, danger = false, label = "Valor" }) {
   const dialog = ensureDialogElement();
   const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-  dialog.dataset.lastFocus = previousFocus && previousFocus.id ? previousFocus.id : "";
+  dialog.previousFocusElement = previousFocus;
   dialog.classList.remove("danger");
   if (danger) dialog.classList.add("danger");
   dialog.setAttribute("aria-labelledby", "dialog-title");
@@ -132,12 +140,24 @@ function buildDialogShell({ title, message, confirmText, cancelText, variant = "
     submitButton.textContent = confirmText || "OK";
     actions.append(cancelButton, submitButton);
     form.append(actions);
+    dialog.append(form);
 
     return { dialog, form, input, errorNode, cancelButton, submitButton };
   }
 
   const actions = document.createElement("div");
   actions.className = "dialog-actions";
+  if (variant === "alert") {
+    const submitButton = document.createElement("button");
+    submitButton.type = "submit";
+    submitButton.className = danger ? "danger-button" : "primary-button";
+    submitButton.textContent = confirmText || "OK";
+    actions.append(submitButton);
+    form.append(actions);
+    dialog.append(form);
+    return { dialog, form, submitButton };
+  }
+
   const cancelButton = document.createElement("button");
   cancelButton.type = "button";
   cancelButton.className = "secondary-button";
@@ -148,6 +168,7 @@ function buildDialogShell({ title, message, confirmText, cancelText, variant = "
   submitButton.textContent = confirmText || (variant === "alert" ? "OK" : "Confirmar");
   actions.append(cancelButton, submitButton);
   form.append(actions);
+  dialog.append(form);
   return { dialog, form, cancelButton, submitButton };
 }
 
@@ -178,16 +199,15 @@ export function promptDialog({ title, message, label, defaultValue = "", placeho
       return true;
     };
 
+    let unregisterDismissal = () => {};
     const closeAndResolve = (value) => {
-      const previousFocus = dialog.dataset.lastFocus ? document.getElementById(dialog.dataset.lastFocus) : null;
-      dialog.close();
-      dialog.removeAttribute("data-last-focus");
+      unregisterDismissal();
+      if (dialog.open) dialog.close();
       resolve(value);
-      if (previousFocus && typeof previousFocus.focus === "function") {
-        requestAnimationFrame(() => previousFocus.focus());
-      }
+      restoreDialogFocus(dialog);
     };
 
+    unregisterDismissal = registerDialogDismissal(dialog, () => closeAndResolve(null));
     cancelButton.addEventListener("click", () => closeAndResolve(null));
     closeButtonHandler(dialog, () => closeAndResolve(null));
     form.addEventListener("submit", (event) => {
@@ -195,19 +215,6 @@ export function promptDialog({ title, message, label, defaultValue = "", placeho
       if (!validateInput()) return;
       closeAndResolve(input.value.trim());
     });
-    dialog.addEventListener("keydown", (event) => {
-      trapFocus(dialog, event);
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeAndResolve(null);
-      }
-    });
-    dialog.addEventListener("click", (event) => {
-      if (event.target === dialog) {
-        closeAndResolve(null);
-      }
-    });
-
     if (dialog.showModal) dialog.showModal();
     requestAnimationFrame(() => {
       input.focus();
@@ -227,35 +234,21 @@ export function confirmDialog({ title, message, confirmText = "OK", cancelText =
       danger
     });
 
+    let unregisterDismissal = () => {};
     const closeAndResolve = (value) => {
-      const previousFocus = dialog.dataset.lastFocus ? document.getElementById(dialog.dataset.lastFocus) : null;
-      dialog.close();
-      dialog.removeAttribute("data-last-focus");
+      unregisterDismissal();
+      if (dialog.open) dialog.close();
       resolve(value);
-      if (previousFocus && typeof previousFocus.focus === "function") {
-        requestAnimationFrame(() => previousFocus.focus());
-      }
+      restoreDialogFocus(dialog);
     };
 
+    unregisterDismissal = registerDialogDismissal(dialog, () => closeAndResolve(false));
     cancelButton.addEventListener("click", () => closeAndResolve(false));
-    submitButton.addEventListener("click", () => closeAndResolve(true));
+    closeButtonHandler(dialog, () => closeAndResolve(false));
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       closeAndResolve(true);
     });
-    dialog.addEventListener("keydown", (event) => {
-      trapFocus(dialog, event);
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeAndResolve(false);
-      }
-    });
-    dialog.addEventListener("click", (event) => {
-      if (event.target === dialog) {
-        closeAndResolve(false);
-      }
-    });
-
     if (dialog.showModal) dialog.showModal();
     requestAnimationFrame(() => {
       submitButton.focus();
@@ -273,34 +266,20 @@ export function alertDialog({ title, message, okText = "OK" } = {}) {
       variant: "alert"
     });
 
+    let unregisterDismissal = () => {};
     const closeAndResolve = () => {
-      const previousFocus = dialog.dataset.lastFocus ? document.getElementById(dialog.dataset.lastFocus) : null;
-      dialog.close();
-      dialog.removeAttribute("data-last-focus");
+      unregisterDismissal();
+      if (dialog.open) dialog.close();
       resolve();
-      if (previousFocus && typeof previousFocus.focus === "function") {
-        requestAnimationFrame(() => previousFocus.focus());
-      }
+      restoreDialogFocus(dialog);
     };
 
-    submitButton.addEventListener("click", closeAndResolve);
+    unregisterDismissal = registerDialogDismissal(dialog, closeAndResolve);
+    closeButtonHandler(dialog, closeAndResolve);
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       closeAndResolve();
     });
-    dialog.addEventListener("keydown", (event) => {
-      trapFocus(dialog, event);
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeAndResolve();
-      }
-    });
-    dialog.addEventListener("click", (event) => {
-      if (event.target === dialog) {
-        closeAndResolve();
-      }
-    });
-
     if (dialog.showModal) dialog.showModal();
     requestAnimationFrame(() => {
       submitButton.focus();

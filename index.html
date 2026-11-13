@@ -171,7 +171,7 @@
     <footer class="app-footer">Feito para deixar suas ideias em movimento.</footer>
   </div>
 
-  <dialog id="taskDialog" class="task-dialog">
+  <dialog id="taskDialog" class="task-dialog" aria-labelledby="taskDialogTitle">
     <form id="taskForm" novalidate>
       <div class="dialog-heading">
         <div><p class="eyebrow">TAREFA</p><h2 id="taskDialogTitle">Adicionar tarefa</h2></div>
@@ -204,10 +204,10 @@
       </div>
     </form>
   </dialog>
-  <dialog id="importDialog" class="task-dialog import-dialog">
+  <dialog id="importDialog" class="task-dialog import-dialog" aria-labelledby="importDialogTitle">
     <form id="importForm" novalidate>
       <div class="dialog-heading">
-        <div><p class="eyebrow">DADOS LOCAIS</p><h2>Importar quadros antigos?</h2></div>
+        <div><p class="eyebrow">DADOS LOCAIS</p><h2 id="importDialogTitle">Importar quadros antigos?</h2></div>
       </div>
       <p class="import-description">Há dados salvos neste navegador. Você pode importar os quadros para esta conta ou começar sem eles. Senhas e contas antigas não serão importadas.</p>
       <div id="legacyProfileField" class="form-field" hidden>
@@ -220,9 +220,9 @@
       </div>
     </form>
   </dialog>
-  <dialog id="membersDialog" class="task-dialog members-dialog">
+  <dialog id="membersDialog" class="task-dialog members-dialog" aria-labelledby="membersDialogTitle">
     <form id="membersForm" novalidate>
-      <div class="dialog-heading"><div><p class="eyebrow">ACESSO AO QUADRO</p><h2>Membros</h2></div><button class="icon-button" id="closeMembersDialog" type="button" aria-label="Fechar">×</button></div>
+      <div class="dialog-heading"><div><p class="eyebrow">ACESSO AO QUADRO</p><h2 id="membersDialogTitle">Membros</h2></div><button class="icon-button" id="closeMembersDialog" type="button" aria-label="Fechar">×</button></div>
       <div id="memberList" class="member-list"></div>
       <div class="form-row member-invite-row">
         <div class="form-field"><label for="inviteEmail">E-mail</label><input id="inviteEmail" type="email" maxlength="254" autocomplete="off"></div>

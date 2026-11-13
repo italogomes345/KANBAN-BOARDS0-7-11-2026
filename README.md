@@ -1,10 +1,10 @@
 # Quadros Kanban com Firebase
 
-Aplicação estática em HTML, CSS e JavaScript. Não precisa de Node.js nem npm. O Firebase Authentication gerencia o login e o Cloud Firestore guarda um documento de boards por usuário.
+Aplicação estática em HTML, CSS e JavaScript. Não precisa de build nem de dependências npm no app. O Firebase Authentication gerencia o login e o Cloud Firestore guarda quadros, memberships, tasks e comentários em documentos separados.
 
 ## Arquivos
 
-- `index.html`, `style.css`, `script.js`: interface e lógica da aplicação.
+- `index.html`, `style.css`, `script.js`, `dialogs.js`, `board-data.js`: interface, diálogos e acesso aos dados.
 - `firebase-config.js`: configuração do seu app Web Firebase; preenchido localmente e ignorado pelo Git.
 - `firebase-config.example.js`: modelo de configuração sem valores reais.
 - `firestore.rules`: regras para revisar e publicar no Firestore.
@@ -18,7 +18,7 @@ Aplicação estática em HTML, CSS e JavaScript. Não precisa de Node.js nem npm
 5. Em **Authentication > Método de login**, habilite **E-mail/senha**.
 6. Em **Firestore Database**, crie o banco. Escolha com cuidado a localização: ela não poderá ser alterada depois.
 7. Abra **Firestore Database > Regras**, substitua o conteúdo pelas regras de `firestore.rules` e publique. Nunca deixe regras de teste nem `allow read, write: if true`.
-8. Não crie coleção ou documento manualmente. Depois da primeira autenticação e das regras estarem publicadas, o app cria `boards/{uid}` automaticamente.
+8. Não crie coleção ou documento manualmente. Depois da primeira autenticação e das regras estarem publicadas, o app migra o documento antigo do usuário e cria memberships OWNER para seus quadros.
 
 ## 2. Executar no computador
 
@@ -83,5 +83,7 @@ Depois, confirme que o domínio `boards-kanban.web.app` está em **Authenticatio
 - Tentativas repetidas são limitadas pelo próprio Firebase. O app traduz `auth/too-many-requests`, mas não implementa rate limit no servidor.
 - O projeto não implementa verificação de e-mail, App Check, Cloud Functions ou envio automático de e-mail. Convites ficam pendentes no Firestore e são resgatados no login; o envio da notificação deve ser feito por fora.
 - WIP é validado no fluxo de interface; a autorização de leitura/escrita é sempre validada pelas regras Firestore.
+- Cada task usa revision para rejeitar update concorrente do mesmo card; recarregue o quadro após uma mensagem de conflito.
+- O projeto não possui `package.json` nem scripts npm de build, lint ou testes. A validação de regras é feita pelo Firebase Emulator.
 - O histórico de atividades e notificações não foi incluído; são recursos bônus, fora dos critérios mínimos implementados.
 - Um site estático não consegue manter `firebase-config.js` privado no navegador; isso não é uma fronteira de segurança do Firebase.

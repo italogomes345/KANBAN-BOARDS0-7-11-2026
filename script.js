@@ -1,9 +1,8 @@
 import { firebaseConfig } from "./firebase-config.js";
-import { alertDialog, confirmDialog, promptDialog } from "./dialogs.js";
+import { confirmDialog, promptDialog } from "./dialogs.js";
 import * as boardData from "./board-data.js";
 
 const FIREBASE_VERSION = "11.10.0";
-const BOARDS_COLLECTION = "boards";
 const LEGACY_KEYS = ["quadros-users-v1", "quadros-session-v1", "quadros-kanban-v1"];
 const THEME_KEY = "quadros-theme";
 const BOARD_COLORS = ["#16836d", "#db6b79", "#d49a35", "#4289bd", "#7b70bd", "#658c54"];
@@ -11,7 +10,7 @@ const PRIORITY_LABELS = { baixa: "Baixa", media: "Média", alta: "Alta" };
 const MAX_BOARDS = 20;
 const MAX_COLUMNS = 20;
 const MAX_TASKS_PER_COLUMN = 100;
-const MAX_DOCUMENT_BYTES = 800_000;
+const MAX_TASK_LIST_ITEMS = 100;
 
 const elements = Object.fromEntries([
   "homeLink", "authView", "authForm", "authTitle", "authIntro", "authError", "authSubmit", "authModeToggle", "authSwitchText",
@@ -19,7 +18,7 @@ const elements = Object.fromEntries([
   "confirmField", "confirmPasswordInput", "toggleConfirmPassword", "userName", "logoutButton", "appView", "loadingView",
   "loadingMessage", "dataErrorView", "dataErrorMessage", "retryDataButton", "homeView", "boardView", "boardGrid", "emptyBoards", "sharedBoardGrid", "emptySharedBoards",
   "boardTitle", "activeBoardColor", "columns", "taskSearch", "taskDialog", "taskForm", "taskTitleInput",
-  "taskDescriptionInput", "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog", "importForm",
+  "taskDescriptionInput", "taskPriorityInput", "taskDueDateInput", "taskDialogTitle", "taskError", "importDialog",
   "legacyProfileField", "legacyProfileSelect", "importLegacyButton", "discardLegacyButton", "toast", "themeToggle", "themeIcon",
   "createBoardButton", "backButton", "renameBoardButton", "changeBoardColorButton", "deleteBoardButton", "addTaskButton", "addSprintButton",
   "closeTaskDialog", "cancelTaskButton", "shareBoardButton", "membersDialog", "membersForm", "closeMembersDialog", "memberList",
@@ -40,7 +39,6 @@ let draggedTask = null;
 let authMode = "login";
 let toastTimer = null;
 let authGeneration = 0;
-let boardUnsubscribe = null;
 let activeBoardUnsubscribe = null;
 let commentsUnsubscribe = null;
 let saveQueue = Promise.resolve();
@@ -72,6 +70,7 @@ function showAuthError(message) {
 function mapFirebaseError(error, context = "auth") {
   const code = error && error.code ? error.code : "";
   if (code === "app/no-accessible-boards") return "Nenhum quadro foi encontrado para esta conta. Seus dados existentes não foram removidos; confira o console para a etapa de carga.";
+  if (code === "app/concurrent-task-update") return "Esta tarefa mudou em outra sessão. Atualize o quadro antes de salvar novamente.";
   if (["auth/id-token-expired", "auth/user-token-expired", "auth/invalid-user-token", "unauthenticated"].includes(code)) {
     return "Sua sessão expirou ou deixou de ser válida. Saia da conta e entre novamente.";
   }
@@ -280,10 +279,8 @@ async function logoutUser() {
 }
 
 function stopBoardListener() {
-  if (boardUnsubscribe) boardUnsubscribe();
   if (activeBoardUnsubscribe) activeBoardUnsubscribe();
   if (commentsUnsubscribe) commentsUnsubscribe();
-  boardUnsubscribe = null;
   activeBoardUnsubscribe = null;
   commentsUnsubscribe = null;
 }
@@ -309,25 +306,7 @@ function validateBoards(boards) {
       }
     }
   }
-  try {
-    if (new TextEncoder().encode(JSON.stringify(boards)).length > MAX_DOCUMENT_BYTES) return null;
-  } catch {
-    return null;
-  }
   return boards;
-}
-
-function createDefaultBoards() {
-  return [{
-    id: createId(),
-    name: "Meu quadro",
-    color: BOARD_COLORS[0],
-    columns: [
-      { id: createId(), name: "A Fazer", tasks: [] },
-      { id: createId(), name: "Em Andamento", tasks: [] },
-      { id: createId(), name: "Concluído", tasks: [] }
-    ]
-  }];
 }
 
 function normalizeLegacyBoards(value) {
@@ -388,7 +367,7 @@ function readLegacyOptions() {
 }
 
 function chooseLegacyData(options) {
-  if (!options.hadLocalData) return Promise.resolve({ boards: createDefaultBoards(), clearLegacy: false });
+  if (!options.hadLocalData) return Promise.resolve({ boards: [], clearLegacy: false });
   importChoices = options.profiles;
   elements.legacyProfileField.hidden = importChoices.length < 2;
   elements.legacyProfileSelect.replaceChildren();
@@ -417,15 +396,6 @@ function clearLegacyData() {
   });
 }
 
-function makeDocumentData(uid, boards) {
-  return { ownerUid: uid, schemaVersion: 1, boards, updatedAt: firebaseApi.serverTimestamp() };
-}
-
-function validateDocumentData(data, uid) {
-  if (!data || data.ownerUid !== uid || data.schemaVersion !== 1) return null;
-  return validateBoards(data.boards);
-}
-
 async function loadOrCreateUserBoards(user, generation) {
   state = { boards: await boardData.loadBoards(firebaseApi, db, user, {
     selectLocalBoards: async () => {
@@ -442,6 +412,7 @@ async function loadOrCreateUserBoards(user, generation) {
 }
 
 function handleActiveBoardError(boardId, error) {
+  logFirebaseError(error, `active board ${boardId}`);
   if (error && (error.code === "permission-denied" || error.code === "firestore/permission-denied")) {
     state.boards = state.boards.filter((board) => board.id !== boardId);
     if (activeBoardId === boardId) {
@@ -474,7 +445,7 @@ async function retryLoadingData() {
   }
 }
 
-async function persistState(boardId = activeBoardId) {
+async function persistState(boardId = activeBoardId, taskChanges = [], saveMetadata = true) {
   if (!currentUser || !dataReady || !db || !firebaseApi) return;
   const board = state.boards.find((item) => item.id === boardId);
   if (!board || !canEditBoard(board)) return;
@@ -490,7 +461,16 @@ async function persistState(boardId = activeBoardId) {
   elements.loadingView.hidden = false;
   saveQueue = saveQueue.catch(() => {}).then(async () => {
     if (!currentUser || currentUser.uid !== uid) return;
-    await boardData.saveBoard(capturedBoard, firebaseApi, db);
+    const latestBoard = state.boards.find((item) => item.id === boardId) || capturedBoard;
+    const boardToSave = JSON.parse(JSON.stringify(latestBoard));
+    const savedRevisions = await boardData.saveBoard(boardToSave, firebaseApi, db, taskChanges, saveMetadata);
+    const liveBoard = state.boards.find((item) => item.id === boardId);
+    if (liveBoard) {
+      savedRevisions.forEach(({ taskId, revision }) => {
+        const task = liveBoard.columns.flatMap((column) => column.tasks).find((item) => item.id === taskId);
+        if (task) task.revision = revision;
+      });
+    }
   });
   try {
     await saveQueue;
@@ -515,6 +495,7 @@ function createBoard(name, color = BOARD_COLORS[0]) {
   state.boards.push(board);
   renderBoards();
   boardData.createBoard(board, firebaseApi, db, currentUser).catch((error) => {
+    logFirebaseError(error, "create board");
     state.boards = state.boards.filter((item) => item.id !== board.id);
     renderBoards();
     showToast(mapFirebaseError(error, "data"));
@@ -526,14 +507,19 @@ function createTask(column, title, details = {}) {
     showToast(column.wipLimit ? `Limite WIP atingido em "${column.name}".` : "Você não tem permissão para editar este quadro.");
     return false;
   }
-  column.tasks.push({
+  if (column.tasks.length >= MAX_TASKS_PER_COLUMN) {
+    showToast(`Esta coluna atingiu o limite de ${MAX_TASKS_PER_COLUMN} tarefas.`);
+    return false;
+  }
+  const task = {
     id: createId(), title, description: details.description || "",
     priority: details.priority || "media", dueDate: details.dueDate || "", labels: details.labels || [],
     assigneeUid: details.assigneeUid || "", assigneeName: details.assigneeName || "", checklist: details.checklist || [],
-    acceptanceCriteria: details.acceptanceCriteria || [], storyPoints: details.storyPoints || 0, sprintId: details.sprintId || ""
-  });
+    acceptanceCriteria: details.acceptanceCriteria || [], storyPoints: details.storyPoints || 0, sprintId: details.sprintId || "", revision: 0
+  };
+  column.tasks.push(task);
   renderColumns();
-  void persistState(activeBoardId);
+  void persistState(activeBoardId, [{ taskId: task.id, action: "upsert" }], false);
   return true;
 }
 
@@ -914,6 +900,7 @@ async function deleteBoard(board) {
     await boardData.deleteBoard(board.id, firebaseApi, db);
     showToast("Quadro excluído.");
   } catch (error) {
+    logFirebaseError(error, `delete board ${board.id}`);
     showToast(mapFirebaseError(error, "data"));
     void retryLoadingData();
   }
@@ -921,6 +908,8 @@ async function deleteBoard(board) {
 
 async function addColumn() {
   if (!canEditBoard()) return;
+  const board = getActiveBoard();
+  if (!board || board.columns.length >= MAX_COLUMNS) { showToast(`Este quadro atingiu o limite de ${MAX_COLUMNS} colunas.`); return; }
   const name = await promptDialog({
     title: "Nova coluna",
     message: "Crie uma coluna para separar etapas do trabalho, como 'A fazer' ou 'Concluído'.",
@@ -975,9 +964,10 @@ async function deleteColumn(column) {
   });
   if (!confirmed) return;
   const board = getActiveBoard();
+  const taskChanges = column.tasks.map((task) => ({ taskId: task.id, action: "delete", revision: task.revision || 0 }));
   board.columns = board.columns.filter((item) => item.id !== column.id);
   renderColumns();
-  void persistState(board.id);
+  void persistState(board.id, taskChanges, true);
   showToast("Coluna excluída.");
 }
 
@@ -1043,23 +1033,31 @@ function saveTaskFromDialog(event) {
   const column = board && board.columns.find((item) => item.id === editingTask.columnId);
   if (!column) return;
   const details = { description, priority: elements.taskPriorityInput.value, dueDate: elements.taskDueDateInput.value };
+  let taskToSave;
   if (editingTask.taskId) {
     const task = column.tasks.find((item) => item.id === editingTask.taskId);
-    if (task) Object.assign(task, { title, ...details });
+    if (!task) return;
+    Object.assign(task, { title, ...details });
+    taskToSave = task;
   } else {
     if (column.wipLimit && column.tasks.length >= column.wipLimit) {
       elements.taskError.textContent = `Limite WIP atingido em "${column.name}".`;
       return;
     }
-    column.tasks.push({
+    if (column.tasks.length >= MAX_TASKS_PER_COLUMN) {
+      elements.taskError.textContent = `Esta coluna atingiu o limite de ${MAX_TASKS_PER_COLUMN} tarefas.`;
+      return;
+    }
+    taskToSave = {
       id: createId(), title, ...details, labels: [], assigneeUid: "", assigneeName: "", checklist: [],
-      acceptanceCriteria: [], storyPoints: 0, sprintId: ""
-    });
+      acceptanceCriteria: [], storyPoints: 0, sprintId: "", revision: 0
+    };
+    column.tasks.push(taskToSave);
   }
   editingTask = null;
   elements.taskDialog.close();
   renderColumns();
-  void persistState(activeBoardId);
+  void persistState(board.id, [{ taskId: taskToSave.id, action: "upsert" }], false);
   showToast("Tarefa salva.");
 }
 
@@ -1079,7 +1077,7 @@ async function deleteTask(columnId, taskId) {
   if (!confirmed) return;
   column.tasks = column.tasks.filter((item) => item.id !== taskId);
   renderColumns();
-  void persistState(activeBoardId);
+  void persistState(activeBoardId, [{ taskId, action: "delete", revision: task.revision || 0 }], false);
   showToast("Tarefa excluída.");
 }
 
@@ -1094,28 +1092,36 @@ function findTaskContext(taskId) {
 }
 
 async function openTaskPage(taskId) {
-  const context = findTaskContext(taskId);
-  if (!context) {
-    showDataError("Acesso negado. A tarefa não existe ou sua conta não é membro do quadro.");
-    return;
+  try {
+    const context = findTaskContext(taskId);
+    if (!context) {
+      showDataError("Acesso negado. A tarefa não existe ou sua conta não é membro do quadro.");
+      return;
+    }
+    if (activeBoardUnsubscribe) activeBoardUnsubscribe();
+    if (commentsUnsubscribe) commentsUnsubscribe();
+    activeBoardId = context.board.id;
+    activeTaskContext = { boardId: context.board.id, taskId };
+    elements.loadingView.hidden = true;
+    elements.dataErrorView.hidden = true;
+    elements.homeView.hidden = true;
+    elements.boardView.hidden = true;
+    elements.taskPageView.hidden = false;
+    await loadTaskMembers(context.board);
+    renderTaskPage();
+    activeBoardUnsubscribe = boardData.subscribeBoard(firebaseApi, db, context.board.id, context.board.role, currentUser.uid, (updatedBoard) => {
+      const index = state.boards.findIndex((item) => item.id === updatedBoard.id);
+      if (index >= 0) state.boards[index] = updatedBoard;
+      if (activeTaskContext && activeTaskContext.taskId === taskId) renderTaskPage();
+    }, (error) => handleActiveBoardError(context.board.id, error));
+    commentsUnsubscribe = boardData.subscribeComments(firebaseApi, db, context.board.id, taskId, renderComments, (error) => {
+      logFirebaseError(error, `comments for task ${taskId}`);
+      showToast(mapFirebaseError(error, "data"));
+    });
+  } catch (error) {
+    logFirebaseError(error, `open task ${taskId}`);
+    showDataError(mapFirebaseError(error, "data"));
   }
-  if (activeBoardUnsubscribe) activeBoardUnsubscribe();
-  if (commentsUnsubscribe) commentsUnsubscribe();
-  activeBoardId = context.board.id;
-  activeTaskContext = { boardId: context.board.id, taskId };
-  elements.loadingView.hidden = true;
-  elements.dataErrorView.hidden = true;
-  elements.homeView.hidden = true;
-  elements.boardView.hidden = true;
-  elements.taskPageView.hidden = false;
-  await loadTaskMembers(context.board);
-  renderTaskPage();
-  activeBoardUnsubscribe = boardData.subscribeBoard(firebaseApi, db, context.board.id, context.board.role, currentUser.uid, (updatedBoard) => {
-    const index = state.boards.findIndex((item) => item.id === updatedBoard.id);
-    if (index >= 0) state.boards[index] = updatedBoard;
-    if (activeTaskContext && activeTaskContext.taskId === taskId) renderTaskPage();
-  }, (error) => handleActiveBoardError(context.board.id, error));
-  commentsUnsubscribe = boardData.subscribeComments(firebaseApi, db, context.board.id, taskId, renderComments, (error) => showToast(mapFirebaseError(error, "data")));
 }
 
 async function loadTaskMembers(board) {
@@ -1162,10 +1168,11 @@ function renderTaskPage() {
 function renderTaskChecklist(items, container, property, editable) {
   container.replaceChildren();
   items.forEach((item, index) => {
-    const row = document.createElement("label");
+    const row = document.createElement("div");
     row.className = "checklist-row";
     const checkbox = document.createElement("input");
     checkbox.type = "checkbox";
+    checkbox.id = `task-${activeTaskContext.taskId}-${property}-${index}`;
     checkbox.checked = Boolean(item && item.done);
     checkbox.disabled = !editable;
     checkbox.addEventListener("change", () => {
@@ -1173,9 +1180,10 @@ function renderTaskChecklist(items, container, property, editable) {
       if (!context || !canEditBoard(context.board)) return;
       context.task[property][index].done = checkbox.checked;
       renderTaskPage();
-      void persistState(context.board.id);
+      void persistState(context.board.id, [{ taskId: context.task.id, action: "upsert" }], false);
     });
-    const text = document.createElement("span");
+    const text = document.createElement("label");
+    text.htmlFor = checkbox.id;
     text.textContent = typeof item === "string" ? item : item.text || "";
     row.append(checkbox, text);
     if (editable) {
@@ -1189,7 +1197,7 @@ function renderTaskChecklist(items, container, property, editable) {
         if (!context || !canEditBoard(context.board)) return;
         context.task[property].splice(index, 1);
         renderTaskPage();
-        void persistState(context.board.id);
+        void persistState(context.board.id, [{ taskId: context.task.id, action: "upsert" }], false);
       });
       row.append(removeButton);
     }
@@ -1203,31 +1211,35 @@ function addTaskListItem(event, property, input) {
   const text = input.value.trim();
   if (!context || !canEditBoard(context.board) || !text) return;
   if (!Array.isArray(context.task[property])) context.task[property] = [];
+  if (context.task[property].length >= MAX_TASK_LIST_ITEMS) {
+    showToast(`O limite de ${MAX_TASK_LIST_ITEMS} itens foi atingido.`);
+    return;
+  }
   context.task[property].push({ id: createId(), text, done: false });
   input.value = "";
   renderTaskPage();
-  void persistState(context.board.id);
+  void persistState(context.board.id, [{ taskId: context.task.id, action: "upsert" }], false);
 }
 
 function updateTaskFromPage() {
   const context = activeTaskContext && findTaskContext(activeTaskContext.taskId);
   if (!context || !canEditBoard(context.board)) return;
-  const assignee = elements.taskAssigneeInput.selectedOptions[0];
-  context.task.assigneeUid = elements.taskAssigneeInput.value;
-  context.task.assigneeName = assignee && assignee.value ? assignee.textContent : "";
-  context.task.dueDate = elements.taskPageDueDate.value;
-  context.task.priority = elements.taskPagePriority.value;
-  context.task.labels = Array.from(elements.taskPageLabels.selectedOptions, (option) => option.value);
   const points = Number(elements.taskStoryPoints.value);
   if (!Number.isInteger(points) || points < 0 || points > 100) {
     showToast("Story points deve ser um inteiro entre 0 e 100.");
     elements.taskStoryPoints.value = String(context.task.storyPoints || 0);
     return;
   }
+  const assignee = elements.taskAssigneeInput.selectedOptions[0];
+  context.task.assigneeUid = elements.taskAssigneeInput.value;
+  context.task.assigneeName = assignee && assignee.value ? assignee.textContent : "";
+  context.task.dueDate = elements.taskPageDueDate.value;
+  context.task.priority = elements.taskPagePriority.value;
+  context.task.labels = Array.from(elements.taskPageLabels.selectedOptions, (option) => option.value);
   context.task.storyPoints = points;
   context.task.sprintId = elements.taskSprint.value;
   renderColumns();
-  void persistState(context.board.id);
+  void persistState(context.board.id, [{ taskId: context.task.id, action: "upsert" }], false);
 }
 
 function renderComments(comments) {
@@ -1268,6 +1280,7 @@ async function submitTaskComment(event) {
     await boardData.addComment(context.board.id, context.task.id, text, firebaseApi, db, currentUser);
     elements.commentInput.value = "";
   } catch (error) {
+    logFirebaseError(error, `comment on task ${context.task.id}`);
     showToast(mapFirebaseError(error, "data"));
   }
 }
@@ -1275,6 +1288,7 @@ async function submitTaskComment(event) {
 async function addSprint() {
   const board = getActiveBoard();
   if (!canEditBoard(board)) return;
+  if (board.sprints.length >= 30) { showToast("Este quadro atingiu o limite de 30 sprints."); return; }
   const name = await promptDialog({ title: "Nova sprint", message: "Dê um nome para o ciclo de trabalho.", label: "Nome da sprint", placeholder: "Ex.: Sprint 1", maxLength: 80, confirmText: "Criar" });
   if (!name) return;
   board.sprints.push({ id: createId(), name: name.trim() });
@@ -1289,8 +1303,14 @@ async function openMembersDialog() {
   elements.inviteEmail.disabled = !isBoardOwner(board);
   elements.inviteRole.disabled = !isBoardOwner(board);
   elements.inviteMemberButton.hidden = !isBoardOwner(board);
-  await renderMembers(board);
-  elements.membersDialog.showModal();
+  try {
+    await renderMembers(board);
+    elements.membersDialog.showModal();
+  } catch (error) {
+    logFirebaseError(error, `load members for board ${board.id}`);
+    elements.membersError.textContent = mapFirebaseError(error, "data");
+    elements.membersDialog.showModal();
+  }
 }
 
 async function renderMembers(board) {
@@ -1313,6 +1333,7 @@ async function renderMembers(board) {
         await boardData.changeMemberRole(board.id, member.userUid, role.value, firebaseApi, db);
         showToast("Papel atualizado.");
       } catch (error) {
+        logFirebaseError(error, `change member role on board ${board.id}`);
         role.value = member.role;
         showToast(mapFirebaseError(error, "data"));
       }
@@ -1333,6 +1354,7 @@ async function renderMembers(board) {
           await renderMembers(board);
           showToast("Acesso removido.");
         } catch (error) {
+          logFirebaseError(error, `remove member from board ${board.id}`);
           showToast(mapFirebaseError(error, "data"));
         }
       });
@@ -1363,6 +1385,7 @@ async function renderMembers(board) {
           await renderMembers(board);
           showToast("Convite cancelado.");
         } catch (error) {
+          logFirebaseError(error, `cancel invite ${invite.id}`);
           showToast(mapFirebaseError(error, "data"));
         }
       });
@@ -1385,6 +1408,7 @@ async function inviteBoardMember() {
     elements.membersError.textContent = "Você já é o dono deste quadro.";
     return;
   }
+  elements.inviteMemberButton.disabled = true;
   try {
     await boardData.inviteMember(board.id, email, elements.inviteRole.value, firebaseApi, db, currentUser);
     elements.inviteEmail.value = "";
@@ -1392,7 +1416,10 @@ async function inviteBoardMember() {
     await renderMembers(board);
     showToast("Convite pendente registrado. O acesso será ativado quando a pessoa entrar com este e-mail.");
   } catch (error) {
+    logFirebaseError(error, `invite ${email} to board ${board.id}`);
     elements.membersError.textContent = mapFirebaseError(error, "data");
+  } finally {
+    elements.inviteMemberButton.disabled = false;
   }
 }
 
@@ -1443,7 +1470,7 @@ function handleDrop(event) {
   if (targetIndex < 0) targetIndex = targetColumn.tasks.length;
   targetColumn.tasks.splice(targetIndex, 0, task);
   renderColumns();
-  void persistState(board.id);
+  void persistState(board.id, [{ taskId: task.id, action: "upsert" }], false);
 }
 
 function applySearch() {
@@ -1455,8 +1482,11 @@ function applySearch() {
 }
 
 function formatDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return value;
   const [year, month, day] = value.split("-").map(Number);
-  return new Intl.DateTimeFormat("pt-BR").format(new Date(year, month - 1, day));
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return value;
+  return new Intl.DateTimeFormat("pt-BR", { timeZone: "UTC" }).format(date);
 }
 
 function showToast(message) {
@@ -1501,6 +1531,7 @@ function initializeFirebase() {
     await authSdk.setPersistence(auth, authSdk.indexedDBLocalPersistence);
     authSdk.onAuthStateChanged(auth, handleAuthStateChanged, handleAuthObserverError);
   }).catch((error) => {
+    logFirebaseError(error, "initialize Firebase");
     showAuthError(mapFirebaseError(error));
   });
 }

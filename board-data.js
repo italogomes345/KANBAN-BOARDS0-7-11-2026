@@ -4,6 +4,19 @@ const TASK_COLLECTION = "tasks";
 const INVITE_COLLECTION = "boardInvites";
 const MIGRATION_COLLECTION = "userMigrations";
 const PRIORITIES = new Set(["baixa", "media", "alta"]);
+const MAX_TASK_LIST_ITEMS = 100;
+
+function normalizeTaskList(items) {
+  if (!Array.isArray(items)) return [];
+  return items.slice(0, MAX_TASK_LIST_ITEMS).map((item, index) => {
+    const text = typeof item === "string" ? item : item && typeof item.text === "string" ? item.text : "";
+    return {
+      id: item && typeof item.id === "string" ? item.id : `legacy-${index}`,
+      text: text.trim().slice(0, 160),
+      done: Boolean(item && typeof item === "object" && item.done)
+    };
+  }).filter((item) => item.text);
+}
 
 async function runStage(stage, operation) {
   try {
@@ -30,38 +43,40 @@ function normalizeTask(task, columnId) {
     priority: PRIORITIES.has(task.priority) ? task.priority : "media",
     dueDate: typeof task.dueDate === "string" ? task.dueDate : "",
     assigneeUid: typeof task.assigneeUid === "string" ? task.assigneeUid : "",
-    assigneeName: typeof task.assigneeName === "string" ? task.assigneeName : "",
-    labels: Array.isArray(task.labels) ? task.labels.filter((label) => ["Bug", "Feature", "Urgente"].includes(label)) : [],
-    checklist: Array.isArray(task.checklist) ? task.checklist : [],
-    acceptanceCriteria: Array.isArray(task.acceptanceCriteria) ? task.acceptanceCriteria : [],
+    assigneeName: typeof task.assigneeName === "string" ? task.assigneeName.slice(0, 254) : "",
+    labels: Array.isArray(task.labels) ? task.labels.filter((label) => ["Bug", "Feature", "Urgente"].includes(label)).slice(0, 3) : [],
+    checklist: normalizeTaskList(task.checklist),
+    acceptanceCriteria: normalizeTaskList(task.acceptanceCriteria),
     storyPoints: Number.isInteger(task.storyPoints) ? Math.min(100, Math.max(0, task.storyPoints)) : 0,
-    sprintId: typeof task.sprintId === "string" ? task.sprintId : ""
+    sprintId: typeof task.sprintId === "string" ? task.sprintId : "",
+    order: Number.isInteger(task.order) && task.order >= 0 ? task.order : 0,
+    revision: Number.isInteger(task.revision) && task.revision >= 0 ? task.revision : 0
   };
 }
 
 function normalizeBoard(source, ownerUid, api, role = "OWNER") {
-  const columns = Array.isArray(source.columns) ? source.columns.slice(0, 20).map((column) => {
+  const columns = source && Array.isArray(source.columns) ? source.columns.filter((column) => column && typeof column === "object").slice(0, 20).map((column) => {
     const columnId = typeof column.id === "string" ? column.id : api.doc(api.collection(api.getFirestore(), "_ids")).id;
     return {
       id: columnId,
-      name: String(column.name || "Coluna").trim().slice(0, 60),
+      name: (typeof column.name === "string" ? column.name : "Coluna").trim().slice(0, 60) || "Coluna",
       wipLimit: Number.isInteger(column.wipLimit) && column.wipLimit > 0 ? column.wipLimit : null,
       kind: column.kind === "backlog" ? "backlog" : "work",
-      tasks: Array.isArray(column.tasks) ? column.tasks.map((task) => normalizeTask(task, columnId)) : []
+      tasks: Array.isArray(column.tasks) ? column.tasks.filter((task) => task && typeof task === "object").map((task) => normalizeTask(task, columnId)) : []
     };
   }) : [];
   if (!columns.some((column) => column.kind === "backlog")) {
     columns.unshift({ id: api.doc(api.collection(api.getFirestore(), "_ids")).id, name: "Backlog", wipLimit: null, kind: "backlog", tasks: [] });
   }
   return {
-    id: typeof source.id === "string" ? source.id : api.doc(api.collection(api.getFirestore(), "_ids")).id,
-    name: String(source.name || "Meu quadro").trim().slice(0, 100),
-    color: /^#[0-9a-fA-F]{6}$/.test(source.color) ? source.color : "#16836d",
+    id: source && typeof source.id === "string" ? source.id : api.doc(api.collection(api.getFirestore(), "_ids")).id,
+    name: (source && typeof source.name === "string" ? source.name : "Meu quadro").trim().slice(0, 100) || "Meu quadro",
+    color: source && typeof source.color === "string" && /^#[0-9a-fA-F]{6}$/.test(source.color) ? source.color : "#16836d",
     ownerUid,
     role,
     columns,
-    sprints: Array.isArray(source.sprints) ? source.sprints.slice(0, 30) : [],
-    definitionOfDone: Array.isArray(source.definitionOfDone) ? source.definitionOfDone.slice(0, 30) : []
+    sprints: source && Array.isArray(source.sprints) ? source.sprints.filter((sprint) => sprint && typeof sprint.id === "string" && typeof sprint.name === "string").slice(0, 30) : [],
+    definitionOfDone: source && Array.isArray(source.definitionOfDone) ? normalizeTaskList(source.definitionOfDone) : []
   };
 }
 
@@ -99,15 +114,22 @@ function taskDocument(board, column, task, api) {
 
 function assembleBoard(snapshot, taskSnapshots, role) {
   const data = snapshot.data();
+  const columns = Array.isArray(data.columns) ? data.columns.filter((column) =>
+    column && typeof column.id === "string" && typeof column.name === "string" && column.name.trim()) : [];
   const board = {
     id: snapshot.id,
     ownerUid: data.ownerUid,
     role,
-    name: data.name,
-    color: data.color,
-    columns: (data.columns || []).map((column) => ({ ...column, wipLimit: column.wipLimit || null, tasks: [] })),
-    sprints: data.sprints || [],
-    definitionOfDone: data.definitionOfDone || []
+    name: typeof data.name === "string" && data.name.trim() ? data.name : "Quadro sem nome",
+    color: typeof data.color === "string" && /^#[0-9a-fA-F]{6}$/.test(data.color) ? data.color : "#16836d",
+    columns: columns.map((column) => ({
+      ...column,
+      wipLimit: Number.isInteger(column.wipLimit) && column.wipLimit > 0 ? column.wipLimit : null,
+      kind: column.kind === "backlog" ? "backlog" : "work",
+      tasks: []
+    })),
+    sprints: Array.isArray(data.sprints) ? data.sprints.filter((sprint) => sprint && typeof sprint.id === "string" && typeof sprint.name === "string") : [],
+    definitionOfDone: normalizeTaskList(data.definitionOfDone)
   };
   const columnsById = new Map(board.columns.map((column) => [column.id, column]));
   taskSnapshots.forEach((taskSnapshot) => {
@@ -115,6 +137,7 @@ function assembleBoard(snapshot, taskSnapshots, role) {
     const column = columnsById.get(task.columnId);
     if (column) column.tasks.push(normalizeTask(task, column.id));
   });
+  board.columns.forEach((column) => column.tasks.sort((left, right) => left.order - right.order || left.id.localeCompare(right.id)));
   return board;
 }
 
@@ -122,7 +145,8 @@ async function writeBoardAndOwner(board, api, db, user) {
   const boardRef = api.doc(db, BOARD_COLLECTION, board.id);
   await api.setDoc(boardRef, boardDocument(board, api));
   await ensureOwnerMembership(boardRef, api, db, user);
-  await saveBoard(board, api, db);
+  const taskChanges = board.columns.flatMap((column) => column.tasks.map((task) => ({ taskId: task.id, action: "upsert" })));
+  await saveBoard(board, api, db, taskChanges, true);
 }
 
 async function ensureOwnerMembership(boardRef, api, db, user) {
@@ -163,6 +187,14 @@ async function migrateLegacyBoards(api, db, user, createDefault, selectLocalBoar
         throw new Error(`O quadro legado ${board.id} colide com um documento existente; nenhum dado foi sobrescrito.`);
       }
       await ensureOwnerMembership(boardRef, api, db, user);
+      const missingTasks = [];
+      for (const column of board.columns) {
+        for (const task of column.tasks) {
+          const taskRef = api.doc(boardRef, TASK_COLLECTION, task.id);
+          if (!(await api.getDoc(taskRef)).exists()) missingTasks.push({ taskId: task.id, action: "upsert" });
+        }
+      }
+      if (missingTasks.length) await saveBoard(board, api, db, missingTasks, false);
     } else {
       await writeBoardAndOwner(board, api, db, user);
     }
@@ -184,16 +216,26 @@ async function acceptInvites(api, db, user) {
     if (!(await api.getDoc(boardRef)).exists()) continue;
     const memberRef = api.doc(boardRef, MEMBER_COLLECTION, user.uid);
     if (!(await api.getDoc(memberRef)).exists()) {
-      await api.setDoc(memberRef, {
-        userUid: user.uid,
-        email: user.email,
-        displayName: user.displayName || user.email,
-        role: invite.role,
-        inviteId: inviteSnapshot.id,
-        createdAt: api.serverTimestamp()
-      });
+      try {
+        await api.setDoc(memberRef, {
+          userUid: user.uid,
+          email: user.email,
+          displayName: user.displayName || user.email,
+          role: invite.role,
+          inviteId: inviteSnapshot.id,
+          createdAt: api.serverTimestamp()
+        });
+      } catch (error) {
+        const claimedMember = await api.getDoc(memberRef);
+        if (!claimedMember.exists() || claimedMember.data().userUid !== user.uid || claimedMember.data().role !== invite.role) throw error;
+      }
     }
-    await api.updateDoc(inviteSnapshot.ref, { status: "accepted", acceptedUid: user.uid });
+    try {
+      await api.updateDoc(inviteSnapshot.ref, { status: "accepted", acceptedUid: user.uid });
+    } catch (error) {
+      const currentInvite = await api.getDoc(inviteSnapshot.ref);
+      if (!currentInvite.exists() || currentInvite.data().status !== "accepted" || currentInvite.data().acceptedUid !== user.uid) throw error;
+    }
   }
 }
 
@@ -270,54 +312,83 @@ export async function createBoard(board, api, db, user) {
   await writeBoardAndOwner(board, api, db, user);
 }
 
-export async function saveBoard(board, api, db) {
+export async function saveBoard(board, api, db, taskChanges = [], saveMetadata = true) {
   const boardRef = api.doc(db, BOARD_COLLECTION, board.id);
-  await api.updateDoc(boardRef, boardDocument(board, api));
+  if (saveMetadata) await api.updateDoc(boardRef, boardDocument(board, api));
   const taskCollection = api.collection(boardRef, TASK_COLLECTION);
-  const existing = await api.getDocs(taskCollection);
   const liveTasks = new Map();
-  board.columns.forEach((column) => column.tasks.forEach((task) => liveTasks.set(task.id, { task, column })));
-  const removedTasks = existing.docs.filter((taskSnapshot) => !liveTasks.has(taskSnapshot.id));
-  const operations = [];
-  for (const taskSnapshot of removedTasks) {
-    const comments = await api.getDocs(api.collection(taskSnapshot.ref, "comments"));
-    comments.docs.forEach((comment) => operations.push({ type: "delete", ref: comment.ref }));
-    operations.push({ type: "delete", ref: taskSnapshot.ref });
-  }
-  operations.push(...Array.from(liveTasks, ([taskId, { task, column }]) => ({
-    type: "set", ref: api.doc(taskCollection, taskId), data: taskDocument(board, column, task, api)
-  })));
-  for (let offset = 0; offset < operations.length; offset += 400) {
-    const batch = api.writeBatch(db);
-    operations.slice(offset, offset + 400).forEach((operation) => {
-      if (operation.type === "delete") batch.delete(operation.ref);
-      else batch.set(operation.ref, operation.data);
+    const changesById = new Map(taskChanges.map((change) => [change.taskId, change]));
+    board.columns.forEach((column) => column.tasks.forEach((task, order) => liveTasks.set(task.id, { task, column, order })));
+    liveTasks.forEach(({ task, order }, taskId) => {
+      if (task.order !== order) changesById.set(taskId, { taskId, action: "upsert" });
     });
-    await batch.commit();
+  const savedRevisions = [];
+    for (const change of changesById.values()) {
+    const liveTask = liveTasks.get(change.taskId);
+    const taskRef = api.doc(taskCollection, change.taskId);
+    const expectedRevision = change.action === "delete" ? change.revision || 0 : liveTask && liveTask.task.revision || 0;
+    const revision = await api.runTransaction(db, async (transaction) => {
+      const current = await transaction.get(taskRef);
+      const currentRevision = current.exists() && Number.isInteger(current.data().revision) ? current.data().revision : 0;
+      if (currentRevision !== expectedRevision || change.action === "upsert" && !liveTask) {
+        const conflict = new Error("A tarefa foi alterada em outra sessão. Atualize o quadro antes de tentar novamente.");
+        conflict.code = "app/concurrent-task-update";
+        throw conflict;
+      }
+      if (change.action === "delete") {
+        if (current.exists()) transaction.delete(taskRef);
+        return current.exists();
+      }
+      const nextRevision = currentRevision + 1;
+      transaction.set(taskRef, taskDocument(board, liveTask.column, {
+        ...liveTask.task,
+        order: liveTask.order,
+        revision: nextRevision
+      }, api));
+      return nextRevision;
+    });
+    if (change.action === "delete") {
+      const comments = await api.getDocs(api.collection(taskRef, "comments"));
+      for (let offset = 0; offset < comments.docs.length; offset += 400) {
+        const batch = api.writeBatch(db);
+        comments.docs.slice(offset, offset + 400).forEach((comment) => batch.delete(comment.ref));
+        await batch.commit();
+      }
+    } else if (revision !== null && liveTask) {
+      liveTask.task.revision = revision;
+      liveTask.task.order = liveTask.order;
+      savedRevisions.push({ taskId: change.taskId, revision });
+    }
   }
+  return savedRevisions;
 }
 
 export async function deleteBoard(boardId, api, db) {
   const boardRef = api.doc(db, BOARD_COLLECTION, boardId);
-  const [boardSnapshot, tasks, members, activities] = await Promise.all([
-    api.getDoc(boardRef),
+  const [tasks, members, activities] = await Promise.all([
     api.getDocs(api.collection(boardRef, TASK_COLLECTION)),
     api.getDocs(api.collection(boardRef, MEMBER_COLLECTION)),
     api.getDocs(api.collection(boardRef, "activity"))
   ]);
-  const ownerUid = boardSnapshot.exists() ? boardSnapshot.data().ownerUid : "";
   for (const taskSnapshot of tasks.docs) {
     const comments = await api.getDocs(api.collection(taskSnapshot.ref, "comments"));
+    for (let offset = 0; offset < comments.docs.length; offset += 400) {
+      const batch = api.writeBatch(db);
+      comments.docs.slice(offset, offset + 400).forEach((comment) => batch.delete(comment.ref));
+      await batch.commit();
+    }
+    await api.deleteDoc(taskSnapshot.ref);
+  }
+  const childDocuments = [
+    ...members.docs,
+    ...activities.docs
+  ];
+  for (let offset = 0; offset < childDocuments.length; offset += 400) {
     const batch = api.writeBatch(db);
-    comments.docs.forEach((comment) => batch.delete(comment.ref));
-    batch.delete(taskSnapshot.ref);
+    childDocuments.slice(offset, offset + 400).forEach((document) => batch.delete(document.ref));
     await batch.commit();
   }
-  const batch = api.writeBatch(db);
-  members.docs.filter((member) => member.data().userUid !== ownerUid).forEach((member) => batch.delete(member.ref));
-  activities.docs.forEach((activity) => batch.delete(activity.ref));
-  batch.delete(boardRef);
-  await batch.commit();
+  await api.deleteDoc(boardRef);
 }
 
 export async function listMembers(boardId, api, db, includeInvites = true) {
@@ -343,7 +414,8 @@ export async function inviteMember(boardId, email, role, api, db, user) {
     || invites.docs.some((invite) => invite.data().email === normalizedEmail && invite.data().status === "pending")) {
     throw { code: "invite/already-member" };
   }
-  const inviteRef = api.doc(api.collection(db, INVITE_COLLECTION));
+  const inviteId = encodeURIComponent(`${boardId}:${normalizedEmail}`);
+  const inviteRef = api.doc(db, INVITE_COLLECTION, inviteId);
   await api.setDoc(inviteRef, {
     boardId,
     email: normalizedEmail,
@@ -403,8 +475,4 @@ export async function addComment(boardId, taskId, text, api, db, user) {
     text: text.trim(),
     createdAt: api.serverTimestamp()
   });
-}
-
-export function createLocalBoardId(api) {
-  return api.doc(api.collection(api.getFirestore(), "_ids")).id;
 }
